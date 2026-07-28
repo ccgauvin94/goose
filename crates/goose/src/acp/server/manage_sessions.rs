@@ -220,6 +220,57 @@ impl GooseAcpAgent {
         Ok(EmptyResponse {})
     }
 
+    pub(super) async fn on_append_session_conversation(
+        &self,
+        req: AppendSessionConversationRequest,
+    ) -> Result<AppendSessionConversationResponse, agent_client_protocol::Error> {
+        let session_id = req.session_id.trim();
+        if session_id.is_empty() {
+            return Err(
+                agent_client_protocol::Error::invalid_params().data("sessionId cannot be empty")
+            );
+        }
+        if req.text.trim().is_empty() {
+            return Err(agent_client_protocol::Error::invalid_params().data("text cannot be empty"));
+        }
+
+        self.session_manager
+            .get_session(session_id, false)
+            .await
+            .map_err(|_| {
+                agent_client_protocol::Error::resource_not_found(Some(session_id.to_string()))
+                    .data(format!("Session not found: {}", session_id))
+            })?;
+
+        // A running turn works from the conversation loaded at its start; a message
+        // persisted mid-run would be invisible to it and clobbered if the run
+        // compacts. Hold the run lock through the insert so a prompt cannot start
+        // (and snapshot the conversation) between the check and the write.
+        let active_prompt_runs = self.active_prompt_runs.lock().await;
+        if let Some(active_run) = active_prompt_runs.get(session_id) {
+            return Err(agent_client_protocol::Error::invalid_params().data(format!(
+                "session has active run `{}`; retry after it completes, or use _goose/unstable/session/steer to inject into the running turn",
+                active_run.run_id
+            )));
+        }
+
+        let message_id = format!("msg_{}_{}", session_id, uuid::Uuid::new_v4());
+        let message = match req.role {
+            AppendMessageRole::User => Message::user(),
+            AppendMessageRole::Assistant => Message::assistant(),
+        }
+        .with_id(message_id.clone())
+        .with_text(req.text);
+
+        self.session_manager
+            .add_message(session_id, &message)
+            .await
+            .internal_err()?;
+        drop(active_prompt_runs);
+
+        Ok(AppendSessionConversationResponse { message_id })
+    }
+
     pub(super) async fn on_update_session_project(
         &self,
         req: UpdateSessionProjectRequest,

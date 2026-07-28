@@ -4762,6 +4762,48 @@
       "x-side": "agent",
       "x-method": "_goose/unstable/session/info"
     },
+    "AppendSessionConversationRequest_unstable": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string"
+        },
+        "role": {
+          "$ref": "#/$defs/AppendMessageRole",
+          "default": "user"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sessionId",
+        "text"
+      ],
+      "description": "Append a text message to a session's conversation without starting a turn.\n\nThe message is persisted directly; the session's next turn picks it up when\nthe conversation is reloaded from storage. Rejected while the session has an\nactive run (`session/steer` is the tool for injecting into a running turn).",
+      "x-side": "agent",
+      "x-method": "_goose/unstable/session/conversation/append"
+    },
+    "AppendMessageRole": {
+      "type": "string",
+      "enum": [
+        "user",
+        "assistant"
+      ]
+    },
+    "AppendSessionConversationResponse_unstable": {
+      "type": "object",
+      "properties": {
+        "messageId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "messageId"
+      ],
+      "x-side": "agent",
+      "x-method": "_goose/unstable/session/conversation/append"
+    },
     "TruncateSessionConversationRequest_unstable": {
       "type": "object",
       "properties": {
@@ -7596,6 +7638,15 @@
                 {
                   "allOf": [
                     {
+                      "$ref": "#/$defs/AppendSessionConversationRequest_unstable"
+                    }
+                  ],
+                  "description": "Params for _goose/unstable/session/conversation/append",
+                  "title": "AppendSessionConversationRequest_unstable"
+                },
+                {
+                  "allOf": [
+                    {
                       "$ref": "#/$defs/TruncateSessionConversationRequest_unstable"
                     }
                   ],
@@ -8376,6 +8427,14 @@
                         }
                       ],
                       "title": "GetSessionInfoResponse_unstable"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/$defs/AppendSessionConversationResponse_unstable"
+                        }
+                      ],
+                      "title": "AppendSessionConversationResponse_unstable"
                     },
                     {
                       "allOf": [

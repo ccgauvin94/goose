@@ -724,6 +724,38 @@ pub struct TruncateSessionConversationRequest {
     pub truncate_from: i64,
 }
 
+/// Append a text message to a session's conversation without starting a turn.
+///
+/// The message is persisted directly; the session's next turn picks it up when
+/// the conversation is reloaded from storage. Rejected while the session has an
+/// active run (`session/steer` is the tool for injecting into a running turn).
+#[derive(Debug, Default, Clone, Serialize, Deserialize, JsonSchema, JsonRpcRequest)]
+#[request(
+    method = "_goose/unstable/session/conversation/append",
+    response = AppendSessionConversationResponse
+)]
+#[serde(rename_all = "camelCase")]
+pub struct AppendSessionConversationRequest {
+    pub session_id: String,
+    #[serde(default)]
+    pub role: AppendMessageRole,
+    pub text: String,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum AppendMessageRole {
+    #[default]
+    User,
+    Assistant,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, JsonRpcResponse)]
+#[serde(rename_all = "camelCase")]
+pub struct AppendSessionConversationResponse {
+    pub message_id: String,
+}
+
 /// Update the project association for a session.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, JsonSchema, JsonRpcRequest)]
 #[request(method = "_goose/unstable/session/project/update", response = EmptyResponse)]

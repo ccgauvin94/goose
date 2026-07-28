@@ -11,6 +11,8 @@ import type { Client } from "@agentclientprotocol/sdk";
 import type {
   AddConfigExtensionRequest_unstable,
   AddSessionExtensionRequest_unstable,
+  AppendSessionConversationRequest_unstable,
+  AppendSessionConversationResponse_unstable,
   AppsDeleteRequest_unstable,
   AppsDeleteResponse_unstable,
   AppsExportRequest_unstable,
@@ -201,6 +203,7 @@ import type {
   UpdateWorkingDirRequest_unstable,
 } from './types.gen.js';
 import {
+  zAppendSessionConversationResponse_unstable,
   zAppsDeleteResponse_unstable,
   zAppsExportResponse_unstable,
   zAppsImportResponse_unstable,
@@ -1115,6 +1118,18 @@ export class GooseExtClient {
     return zGetSessionInfoResponse_unstable.parse(
       raw,
     ) as GetSessionInfoResponse_unstable;
+  }
+
+  async sessionConversationAppend_unstable(
+    params: AppendSessionConversationRequest_unstable,
+  ): Promise<AppendSessionConversationResponse_unstable> {
+    const raw = await this.conn.extMethod(
+      "_goose/unstable/session/conversation/append",
+      params,
+    );
+    return zAppendSessionConversationResponse_unstable.parse(
+      raw,
+    ) as AppendSessionConversationResponse_unstable;
   }
 
   async sessionConversationTruncate_unstable(

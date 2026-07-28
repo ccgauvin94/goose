@@ -442,6 +442,73 @@ fn test_custom_get_available_extensions() {
 
 #[test]
 #[serial]
+fn test_custom_session_conversation_append() {
+    write_acp_global_config(DEFAULT_ACP_TEST_CONFIG);
+    run_test(async move {
+        let openai = OpenAiFixture::new(vec![], Arc::new(EnforceSessionId::default())).await;
+        let mut conn = AcpServerConnection::new(TestConnectionConfig::default(), openai).await;
+
+        let SessionData { session, .. } = conn.new_session().await.unwrap();
+        let session_id = session.session_id().0.clone();
+
+        let result = send_custom(
+            conn.cx(),
+            "_goose/unstable/session/conversation/append",
+            serde_json::json!({
+                "sessionId": session_id,
+                "role": "assistant",
+                "text": "appended note"
+            }),
+        )
+        .await;
+        assert!(result.is_ok(), "expected ok, got: {:?}", result);
+        let message_id = result.unwrap()["messageId"]
+            .as_str()
+            .expect("messageId should be a string")
+            .to_string();
+        assert!(!message_id.is_empty());
+
+        // Role defaults to user when omitted.
+        let result = send_custom(
+            conn.cx(),
+            "_goose/unstable/session/conversation/append",
+            serde_json::json!({ "sessionId": session_id, "text": "hello" }),
+        )
+        .await;
+        assert!(result.is_ok(), "expected ok, got: {:?}", result);
+
+        let info = send_custom(
+            conn.cx(),
+            "_goose/unstable/session/info",
+            serde_json::json!({ "sessionId": session_id }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            info["session"]["_meta"]["messageCount"], 2,
+            "both appended messages should be persisted, got: {info:?}"
+        );
+
+        let result = send_custom(
+            conn.cx(),
+            "_goose/unstable/session/conversation/append",
+            serde_json::json!({ "sessionId": session_id, "text": "   " }),
+        )
+        .await;
+        assert!(result.is_err(), "blank text should be rejected");
+
+        let result = send_custom(
+            conn.cx(),
+            "_goose/unstable/session/conversation/append",
+            serde_json::json!({ "sessionId": "no-such-session", "text": "hello" }),
+        )
+        .await;
+        assert!(result.is_err(), "unknown session should be rejected");
+    });
+}
+
+#[test]
+#[serial]
 fn test_custom_prompt_methods() {
     let _guard = env_lock::lock_env([("EXTENSIONS", None::<&str>)]);
     write_acp_global_config(DEFAULT_ACP_TEST_CONFIG);
@@ -531,6 +598,77 @@ fn test_custom_prompt_methods() {
             missing.code,
             agent_client_protocol::ErrorCode::InvalidParams
         );
+    });
+}
+
+#[test]
+#[serial]
+fn test_custom_session_conversation_append_rejects_active_run() {
+    write_acp_global_config(DEFAULT_ACP_TEST_CONFIG);
+    run_test(async move {
+        let openai = OpenAiFixture::new(
+            vec![(
+                "start work".to_string(),
+                include_str!("acp_test_data/openai_basic.txt"),
+            )],
+            Arc::new(IgnoreSessionId),
+        )
+        .await;
+        let mut conn = AcpServerConnection::new(TestConnectionConfig::default(), openai).await;
+
+        let SessionData { session, .. } = conn.new_session().await.unwrap();
+        let session_id = session.session_id().0.to_string();
+        let acp_session_id = session.session_id().clone();
+
+        let mut prompt = Box::pin(
+            conn.cx()
+                .send_request(PromptRequest::new(
+                    acp_session_id,
+                    vec![ContentBlock::Text(TextContent::new("start work"))],
+                ))
+                .block_task(),
+        );
+        let mut rejected_mid_run = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+
+        while tokio::time::Instant::now() < deadline {
+            tokio::select! {
+                response = &mut prompt => {
+                    response.unwrap();
+                    break;
+                }
+                _ = tokio::time::sleep(Duration::from_millis(5)), if !rejected_mid_run => {
+                    let updates = session.session_updates();
+                    if updates.iter().any(|u| active_run_id_from_update(u).is_some()) {
+                        let error = send_custom(
+                            conn.cx(),
+                            "_goose/unstable/session/conversation/append",
+                            serde_json::json!({ "sessionId": session_id, "text": "mid-run" }),
+                        )
+                        .await
+                        .expect_err("append during an active run should be rejected");
+                        assert_eq!(
+                            error.code,
+                            agent_client_protocol::ErrorCode::InvalidParams
+                        );
+                        rejected_mid_run = true;
+                    }
+                }
+            }
+        }
+        assert!(
+            rejected_mid_run,
+            "never observed an active run to append into"
+        );
+
+        // With the run finished, the same append goes through.
+        let result = send_custom(
+            conn.cx(),
+            "_goose/unstable/session/conversation/append",
+            serde_json::json!({ "sessionId": session_id, "text": "after the run" }),
+        )
+        .await;
+        assert!(result.is_ok(), "expected ok, got: {:?}", result);
     });
 }
 

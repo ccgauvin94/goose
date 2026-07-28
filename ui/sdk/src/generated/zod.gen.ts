@@ -1960,6 +1960,25 @@ export const zGetSessionInfoResponse_unstable = z.object({
     session: zSessionInfo
 });
 
+export const zAppendMessageRole = z.enum(['user', 'assistant']);
+
+/**
+ * Append a text message to a session's conversation without starting a turn.
+ *
+ * The message is persisted directly; the session's next turn picks it up when
+ * the conversation is reloaded from storage. Rejected while the session has an
+ * active run (`session/steer` is the tool for injecting into a running turn).
+ */
+export const zAppendSessionConversationRequest_unstable = z.object({
+    sessionId: z.string(),
+    role: zAppendMessageRole.optional().default('user'),
+    text: z.string()
+});
+
+export const zAppendSessionConversationResponse_unstable = z.object({
+    messageId: z.string()
+});
+
 /**
  * Truncate a session conversation from the given message timestamp onward.
  */
@@ -2901,6 +2920,7 @@ export const zExtRequest = z.object({
             zKillRunningJobRequest_unstable,
             zInspectRunningJobRequest_unstable,
             zGetSessionInfoRequest_unstable,
+            zAppendSessionConversationRequest_unstable,
             zTruncateSessionConversationRequest_unstable,
             zUpdateSessionProjectRequest_unstable,
             zRenameSessionRequest_unstable,
@@ -3004,6 +3024,7 @@ export const zExtResponse = z.union([
                 zKillRunningJobResponse_unstable,
                 zInspectRunningJobResponse_unstable,
                 zGetSessionInfoResponse_unstable,
+                zAppendSessionConversationResponse_unstable,
                 zCreateSourceResponse_unstable,
                 zListSourcesResponse_unstable,
                 zListAgentMentionsResponse_unstable,
