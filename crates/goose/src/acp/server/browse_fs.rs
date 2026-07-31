@@ -5,6 +5,21 @@ use std::path::{Path, PathBuf};
 /// (`:` on unix). Empty or unset means "only the session's working directory".
 const BROWSE_ROOTS_KEY: &str = "GOOSE_BROWSE_ROOTS";
 
+/// Resolve a client-supplied path to what the OS would actually open.
+///
+/// Separate from [`is_within_roots`] only so the pair can be unit-tested; they must always be
+/// used together and IN THIS ORDER. Checking containment on the unresolved string is the
+/// classic escape: `<root>/../etc` and a symlink pointing out of a root both pass a textual
+/// prefix test and then open something else entirely.
+fn resolve_path(requested: &str) -> std::io::Result<PathBuf> {
+    PathBuf::from(requested).canonicalize()
+}
+
+/// Containment test. `canonical` MUST already be canonicalised -- see [`resolve_path`].
+fn is_within_roots(canonical: &Path, roots: &[PathBuf]) -> bool {
+    roots.iter().any(|r| canonical.starts_with(r))
+}
+
 impl GooseAcpAgent {
     /// Roots this session may browse: its own working directory, plus anything operator-configured.
     ///
@@ -82,17 +97,12 @@ impl GooseAcpAgent {
             });
         }
 
-        // CANONICALISE FIRST, THEN CHECK. Testing the raw string would let `..` segments and
-        // symlinks walk straight out of an allowed root -- the check has to run on the path the
-        // OS will actually open, not the one the client typed.
-        let path = PathBuf::from(requested);
-        let canonical = path.canonicalize().map_err(|e| {
+        let canonical = resolve_path(requested).map_err(|e| {
             agent_client_protocol::Error::resource_not_found(Some(requested.to_string()))
                 .data(format!("Cannot resolve {}: {}", requested, e))
         })?;
 
-        let allowed = roots.iter().any(|r| canonical.starts_with(r));
-        if !allowed {
+        if !is_within_roots(&canonical, &roots) {
             // Say it is outside the allowlist rather than "not found": the path may well exist,
             // and pretending otherwise sends the user hunting for a typo that is not there. The
             // roots are returned to the client anyway, so this leaks nothing it cannot already see.
@@ -160,5 +170,78 @@ impl GooseAcpAgent {
             entries,
             roots: root_strings,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_within_roots, resolve_path};
+    use std::path::PathBuf;
+
+    fn tmp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("goose-browse-test-{}", name));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d.canonicalize().unwrap()
+    }
+
+    #[test]
+    fn plain_subdirectory_is_allowed() {
+        let base = tmp("plain");
+        let root = base.join("root");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        let roots = vec![root.canonicalize().unwrap()];
+        let p = resolve_path(root.join("sub").to_str().unwrap()).unwrap();
+        assert!(is_within_roots(&p, &roots));
+    }
+
+    #[test]
+    fn dotdot_cannot_escape_a_root() {
+        let base = tmp("dotdot");
+        let root = base.join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(base.join("outside")).unwrap();
+        let roots = vec![root.canonicalize().unwrap()];
+
+        // Textually this starts with the root; canonicalised it does not.
+        let sneaky = root.join("..").join("outside");
+        let resolved = resolve_path(sneaky.to_str().unwrap()).unwrap();
+        assert!(
+            !is_within_roots(&resolved, &roots),
+            "`..` traversal escaped the allowlist: {}",
+            resolved.display()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_out_of_a_root_cannot_escape() {
+        let base = tmp("symlink");
+        let root = base.join("root");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
+        let roots = vec![root.canonicalize().unwrap()];
+
+        let resolved = resolve_path(root.join("escape").to_str().unwrap()).unwrap();
+        assert!(
+            !is_within_roots(&resolved, &roots),
+            "symlink escaped the allowlist: {}",
+            resolved.display()
+        );
+    }
+
+    #[test]
+    fn sibling_with_a_shared_name_prefix_is_not_inside() {
+        // "/a/root-evil" must not count as inside "/a/root" just because the string starts with it.
+        let base = tmp("prefix");
+        let root = base.join("root");
+        let evil = base.join("root-evil");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&evil).unwrap();
+        let roots = vec![root.canonicalize().unwrap()];
+        let resolved = resolve_path(evil.to_str().unwrap()).unwrap();
+        assert!(!is_within_roots(&resolved, &roots));
     }
 }
