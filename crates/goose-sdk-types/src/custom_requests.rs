@@ -170,6 +170,61 @@ pub struct AppsDeleteResponse {
     pub message: String,
 }
 
+/// One entry in a [`ListDirectoryResponse`].
+#[derive(Debug, Default, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectoryEntry {
+    /// File name only, no path.
+    pub name: String,
+    /// Absolute path, as the agent sees it.
+    pub path: String,
+    pub is_dir: bool,
+    /// Absent for directories and for entries we could not stat.
+    pub size: Option<u64>,
+    /// RFC3339 UTC, absent if unavailable.
+    pub modified: Option<String>,
+    /// True if the entry is a symlink. `is_dir` then describes the TARGET, because that is what
+    /// a browser needs to know to decide whether the row is enterable.
+    pub is_symlink: bool,
+}
+
+/// List a directory on the AGENT's filesystem.
+///
+/// ACP has no directory listing in either direction: its only fs methods are `fs/read_text_file`
+/// and `fs/write_text_file`, and both run agent->client, for editors that want the agent to see
+/// unsaved buffers. That is the opposite of what a remote client needs to browse the machine
+/// goose is actually running on, hence this method.
+///
+/// **Access is restricted to an allowlist of roots** and is not a general filesystem read. goose
+/// runs with the user's own privileges -- on a container deployment that includes its own config
+/// directory and any stored provider secrets -- and the ACP endpoint may be reachable from the
+/// internet behind a single shared credential. An unrestricted lister would turn that credential
+/// into a remote filesystem read primitive. See `browse_roots` in the server for how roots are
+/// resolved; paths are canonicalised BEFORE the check so `..` and symlinks cannot escape.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, JsonSchema, JsonRpcRequest)]
+#[request(method = "_goose/unstable/fs/list_directory", response = ListDirectoryResponse)]
+#[serde(rename_all = "camelCase")]
+pub struct ListDirectoryRequest {
+    pub session_id: String,
+    /// Absolute path to list. Omit or send empty to list the allowed roots themselves, which is
+    /// how a client discovers where it may browse without hardcoding anything.
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize, JsonSchema, JsonRpcResponse)]
+#[serde(rename_all = "camelCase")]
+pub struct ListDirectoryResponse {
+    /// The canonicalised path actually listed. Empty when listing the roots.
+    pub path: String,
+    /// Parent directory, or absent at a root boundary -- a client should not offer "up" past it.
+    pub parent: Option<String>,
+    /// Directories first, then files, each alphabetical.
+    pub entries: Vec<DirectoryEntry>,
+    /// The roots this session may browse, so a client can render a picker.
+    pub roots: Vec<String>,
+}
+
 /// Update the working directory for a session.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, JsonSchema, JsonRpcRequest)]
 #[request(method = "_goose/unstable/session/working-dir/update", response = EmptyResponse)]

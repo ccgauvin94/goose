@@ -109,6 +109,14 @@ impl GooseAcpAgent {
         self.on_delete_app(req).await
     }
 
+    #[custom_method(ListDirectoryRequest)]
+    async fn dispatch_list_directory(
+        &self,
+        req: ListDirectoryRequest,
+    ) -> Result<ListDirectoryResponse, agent_client_protocol::Error> {
+        self.on_list_directory(req).await
+    }
+
     #[custom_method(UpdateWorkingDirRequest)]
     async fn dispatch_update_working_dir(
         &self,
