@@ -3,7 +3,11 @@
 # Multi-stage build for minimal final image size
 
 # Build stage
-FROM rust:1.82-bookworm AS builder
+# 1.82 was the pin upstream shipped, and it CANNOT build this tree: the workspace declares
+# rust-version = "1.94.1", so cargo refuses before compiling anything. The published image is
+# built by CI from a tagged release rather than from main, which is why the mismatch survives
+# upstream unnoticed. Keep this in step with Cargo.toml's rust-version on every rebase.
+FROM rust:1.94-bookworm AS builder
 
 # Install build dependencies
 RUN apt-get update && \
