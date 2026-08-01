@@ -1,3 +1,4 @@
+use crate::config::GooseMode;
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -1014,12 +1015,32 @@ async fn execute_job(
 
     let agent = Agent::new();
 
+    // A recipe's `settings:` block wins over the global config, the same way it does for an
+    // interactive `goose run --recipe`. Without this a scheduled recipe silently runs on
+    // whatever model the user last picked in the client: a recipe pinned to a cloud model
+    // specifically so the job would not depend on a local one was observed running on the
+    // global default instead, with nothing anywhere reporting the substitution.
+    let settings = recipe.settings.as_ref();
     let config = Config::global();
-    let provider_name = config.get_goose_provider()?;
-    let model_name = config.get_goose_model()?;
-    let model_config =
+    let provider_name = settings
+        .and_then(|s| s.goose_provider.clone())
+        .map_or_else(|| config.get_goose_provider(), Ok)?;
+    let model_name = settings
+        .and_then(|s| s.goose_model.clone())
+        .map_or_else(|| config.get_goose_model(), Ok)?;
+    let mut model_config =
         crate::model_config::model_config_from_user_config(&provider_name, &model_name)?;
+    if let Some(temperature) = settings.and_then(|s| s.temperature) {
+        model_config = model_config.with_temperature(Some(temperature));
+    }
 
+    // NOBODY IS THERE TO APPROVE ANYTHING. A scheduled run has no attached client, so under
+    // `smart_approve` (the sensible interactive default, and therefore the usual global
+    // setting) the first tool call that wants confirmation blocks until the job is killed.
+    // Observed as a job stuck `currentlyRunning` for 20 minutes having persisted exactly one
+    // message -- no error, no timeout, no log line. Read-only scheduled recipes are kept safe
+    // by their extension allowlists, which is a real boundary; an approval prompt with no
+    // recipient is not.
     let session = agent
         .config
         .session_manager
@@ -1027,8 +1048,11 @@ async fn execute_job(
             std::env::current_dir()?,
             format!("Scheduled job: {}", job.id),
             SessionType::Scheduled,
-            agent.config.goose_mode,
+            GooseMode::Auto,
         )
+        .await?;
+    agent
+        .update_goose_mode(GooseMode::Auto, &session.id)
         .await?;
 
     let mut extensions = resolve_extensions_for_new_session(recipe.extensions.as_deref(), None);

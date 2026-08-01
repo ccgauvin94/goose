@@ -146,7 +146,11 @@ impl GooseAcpAgent {
                 name: item.file_name().to_string_lossy().to_string(),
                 path: entry_path.to_string_lossy().to_string(),
                 is_dir,
-                size: if is_dir { None } else { meta.as_ref().map(|m| m.len()) },
+                size: if is_dir {
+                    None
+                } else {
+                    meta.as_ref().map(|m| m.len())
+                },
                 modified,
                 is_symlink,
             });
