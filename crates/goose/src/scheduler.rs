@@ -1137,6 +1137,22 @@ async fn execute_job(
         retry_config: None,
     };
 
+    // ATTACH THE RECIPE BEFORE THE RUN, NOT AFTER IT. This used to happen only once the stream
+    // had finished, which reads as bookkeeping and is not: `summon` resolves delegate/load
+    // sources from `session.recipe.sub_recipes`, so for the whole of the run the session had no
+    // recipe and a fan-out recipe's own sub-recipes did not exist. The symptom is
+    // "Error: Source 'check_calendar' not found" on a recipe whose sub_recipes block is right
+    // there in the file, followed by the agent finding only unrelated library recipes when it
+    // lists what IS available.
+    agent
+        .config
+        .session_manager
+        .update(&session.id)
+        .schedule_id(Some(job.id.clone()))
+        .recipe(Some(recipe))
+        .apply()
+        .await?;
+
     let stream = agent
         .reply(user_message, session_config, Some(cancel_token))
         .await?;
@@ -1163,15 +1179,6 @@ async fn execute_job(
             }
         }
     }
-
-    agent
-        .config
-        .session_manager
-        .update(&session.id)
-        .schedule_id(Some(job.id.clone()))
-        .recipe(Some(recipe))
-        .apply()
-        .await?;
 
     {
         let session_duration = start_time.elapsed();
