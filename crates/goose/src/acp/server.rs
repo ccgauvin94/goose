@@ -193,6 +193,9 @@ pub struct GooseAcpAgentOptions {
     pub goose_platform: GoosePlatform,
     pub additional_source_roots: Vec<SourceRoot>,
     pub scheduler: Option<Arc<dyn SchedulerTrait>>,
+    /// When set, new sessions use this host-controlled working directory instead
+    /// of the `cwd` the connecting client sends (see `AcpServerFactoryConfig`).
+    pub session_cwd: Option<std::path::PathBuf>,
 }
 
 pub struct GooseAcpAgent {
@@ -217,6 +220,7 @@ pub struct GooseAcpAgent {
     disable_session_naming: bool,
     provider_inventory: ProviderInventoryService,
     additional_source_roots: Vec<SourceRoot>,
+    session_cwd: Option<PathBuf>,
     recipe_path_cache: Arc<Mutex<HashMap<String, PathBuf>>>,
 }
 
@@ -659,6 +663,7 @@ impl GooseAcpAgent {
             disable_session_naming: options.disable_session_naming,
             provider_inventory,
             additional_source_roots: options.additional_source_roots,
+            session_cwd: options.session_cwd,
             recipe_path_cache: Arc::new(Mutex::new(HashMap::new())),
         })
     }
@@ -676,39 +681,46 @@ impl GooseAcpAgent {
         (self.provider_factory)(provider_name.to_string(), extensions, working_dir).await
     }
 
-    async fn maybe_refresh_provider_inventory_with_agent(
-        &self,
-        goose_session: &Session,
-        agent: &Arc<Agent>,
-    ) {
-        let Some(provider_name) = goose_session.provider_name.as_deref() else {
+    /// Warm the provider model-list cache after session creation.
+    ///
+    /// This is a best-effort cache refresh, never a prerequisite for using the
+    /// session, so it runs as a detached background task. Keeping it off the
+    /// `session/new` critical path avoids stalling session creation on slow or
+    /// blocking work such as a synchronous keychain read while resolving the
+    /// provider's inventory identity.
+    fn spawn_provider_inventory_refresh(&self, goose_session: &Session, agent: &Arc<Agent>) {
+        let Some(provider_name) = goose_session.provider_name.clone() else {
             return;
         };
-        let Some(mut inventory) = self
-            .provider_inventory
-            .find_entry_for_provider(provider_name)
-            .await
-        else {
-            return;
-        };
-        if !should_refresh_inventory_for_session_init(&inventory) {
-            return;
-        }
-        let provider = match agent.provider().await {
-            Ok(provider) => provider,
-            Err(error) => {
-                warn!(
-                    provider = %provider_name,
-                    session = %goose_session.id,
-                    error = %error,
-                    "agent has no provider available for inventory refresh"
-                );
+        let inventory_service = self.provider_inventory.clone();
+        let agent = agent.clone();
+        let session_id = goose_session.id.clone();
+        tokio::spawn(async move {
+            let Some(mut inventory) = inventory_service
+                .find_entry_for_provider(&provider_name)
+                .await
+            else {
+                return;
+            };
+            if !should_refresh_inventory_for_session_init(&inventory) {
                 return;
             }
-        };
-        self.provider_inventory
-            .refresh_with_provider(provider_name, &provider, &mut inventory, "session init")
-            .await;
+            let provider = match agent.provider().await {
+                Ok(provider) => provider,
+                Err(error) => {
+                    warn!(
+                        provider = %provider_name,
+                        session = %session_id,
+                        error = %error,
+                        "agent has no provider available for inventory refresh"
+                    );
+                    return;
+                }
+            };
+            inventory_service
+                .refresh_with_provider(&provider_name, &provider, &mut inventory, "session init")
+                .await;
+        });
     }
 
     async fn get_or_create_session_agent_with_results(
@@ -842,8 +854,7 @@ impl GooseAcpAgent {
         let agent = agent_result.agent.clone();
         self.apply_acp_extension_overrides(cx, &agent, session)
             .await;
-        self.maybe_refresh_provider_inventory_with_agent(session, &agent)
-            .await;
+        self.spawn_provider_inventory_refresh(session, &agent);
 
         Ok((agent, agent_result.extension_results))
     }
@@ -2324,6 +2335,7 @@ pub async fn run(builtins: Vec<String>, enable_scheduler: bool) -> Result<()> {
             config_dir: Paths::config_dir(),
             goose_platform: GoosePlatform::GooseCli,
             additional_source_roots: Vec::new(),
+            session_cwd: None,
             enable_scheduler,
         },
     );

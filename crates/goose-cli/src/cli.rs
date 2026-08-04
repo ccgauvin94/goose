@@ -18,6 +18,8 @@ use crate::commands::configure::handle_configure;
 use crate::commands::info::handle_info;
 use crate::commands::plugin::{handle_plugin_install, handle_plugin_update};
 use crate::commands::recipe::{handle_deeplink, handle_list, handle_open, handle_validate};
+#[cfg(feature = "roaming")]
+use crate::commands::roam::{handle_roam_command, RoamCommand};
 use crate::commands::term::{
     handle_term_info, handle_term_init, handle_term_log, handle_term_run, Shell,
 };
@@ -840,6 +842,14 @@ enum Command {
         enable_scheduler: bool,
     },
 
+    /// Share or connect to agents peer-to-peer over iroh
+    #[cfg(feature = "roaming")]
+    #[command(about = "Share or connect to agents peer-to-peer (roaming)")]
+    Roam {
+        #[command(subcommand)]
+        command: RoamCommand,
+    },
+
     /// Start ACP server over HTTP and WebSocket
     #[command(about = "Start ACP server over HTTP and WebSocket")]
     Serve {
@@ -1336,6 +1346,8 @@ fn get_command_name(command: &Option<Command>) -> &'static str {
         Some(Command::Info { .. }) => "info",
         Some(Command::Mcp { .. }) => "mcp",
         Some(Command::Acp { .. }) => "acp",
+        #[cfg(feature = "roaming")]
+        Some(Command::Roam { .. }) => "roam",
         Some(Command::Serve { .. }) => "serve",
         Some(Command::Session { .. }) => "session",
         Some(Command::Run { .. }) => "run",
@@ -1437,6 +1449,7 @@ async fn handle_serve_command(args: ServeCommandArgs) -> Result<()> {
         config_dir: Paths::config_dir(),
         goose_platform: platform.into(),
         additional_source_roots,
+        session_cwd: None,
         enable_scheduler,
     }));
     let env_secret = std::env::var(GOOSE_SERVER_SECRET_KEY_ENV)
@@ -2236,6 +2249,8 @@ pub async fn cli() -> anyhow::Result<()> {
             builtins,
             enable_scheduler,
         }) => goose::acp::server::run(builtins, enable_scheduler).await,
+        #[cfg(feature = "roaming")]
+        Some(Command::Roam { command }) => handle_roam_command(command).await,
         Some(Command::Serve {
             host,
             port,

@@ -16,6 +16,10 @@ pub struct AcpServerFactoryConfig {
     pub config_dir: std::path::PathBuf,
     pub goose_platform: GoosePlatform,
     pub additional_source_roots: Vec<SourceRoot>,
+    /// When set, new sessions use this host-controlled working directory
+    /// instead of the `cwd` the connecting client sends. Used by roaming, where
+    /// the connector's absolute path is meaningless on the host machine.
+    pub session_cwd: Option<std::path::PathBuf>,
     pub enable_scheduler: bool,
 }
 
@@ -94,6 +98,7 @@ impl AcpServer {
             disable_session_naming,
             goose_platform: self.config.goose_platform.clone(),
             additional_source_roots: self.config.additional_source_roots.clone(),
+            session_cwd: self.config.session_cwd.clone(),
             scheduler,
         })
         .await?;
@@ -114,6 +119,7 @@ mod tests {
             data_dir,
             goose_platform: GoosePlatform::GooseCli,
             additional_source_roots: Vec::new(),
+            session_cwd: None,
             enable_scheduler,
         })
     }
