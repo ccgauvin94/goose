@@ -13,15 +13,15 @@
 //! two boundaries — outbound in `merge_sessions`, inbound in the peer's notification
 //! handler — means every handler in between treats it as just another id.
 //!
-//! ## What v1 federates, and what it refuses
+//! ## What federates, and what it refuses
 //!
-//! Routed: `session/list`, `session/load`, `session/prompt`, `session/cancel`, and
-//! permission requests coming back the other way. Everything else — set_model, set_mode,
-//! fork, close — is refused with a clear error for a federated id rather than being
-//! half-forwarded. Model and provider config is per-node: a client's model picker is
-//! populated from *this* machine's inventory, so silently applying it to a session that
-//! lives on another machine would set a model the remote may not have. Refusing is the
-//! honest behaviour until the model list is per-session rather than per-connection.
+//! Routed: `session/list`, `session/load`, `session/prompt`, `session/cancel`,
+//! `session/set_config_option`, rename/archive/delete, and permission requests coming
+//! back the other way. set_config_option is sound to route because the options the
+//! client picks from came from the remote via `session/load` — the write goes back to
+//! the node that offered the choices. Everything else — fork, close, steer, tools,
+//! extensions — is refused with a clear error for a federated id rather than being
+//! half-forwarded.
 //!
 //! ## Pagination is deliberately shallow
 //!
@@ -33,11 +33,14 @@
 
 mod peer;
 
+use crate::acp::custom_requests::{
+    ArchiveSessionRequest, DeleteSessionRequest, EmptyResponse, RenameSessionRequest,
+};
 use agent_client_protocol::schema::v1::{
     CancelNotification, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
     LoadSessionResponse, PromptRequest, PromptResponse, RequestPermissionOutcome,
     RequestPermissionRequest, RequestPermissionResponse, SessionId, SessionInfo,
-    SessionNotification,
+    SessionNotification, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
 };
 use agent_client_protocol::{Client, ConnectionTo};
 use std::sync::{Arc, Mutex};
@@ -66,6 +69,10 @@ const PEER_LIST_TIMEOUT: Duration = Duration::from_secs(5);
 /// session/load replays a whole transcript, so it gets more room than list — but the same
 /// dead-connection hang applies, and a client stuck on load looks identical to a hung app.
 const PEER_LOAD_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// rename/archive/delete are single-row session-store writes on the remote; ten seconds is
+/// generous for anything but a dead connection.
+const PEER_MANAGE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Builds the id a client sees for a session that lives on `peer`.
 pub(super) fn federated_id(peer: &str, remote: &str) -> String {
@@ -186,6 +193,77 @@ impl Federation {
         notif.session_id = SessionId::new(remote_id.to_string());
         if let Ok(peer) = self.peer(peer) {
             peer.cancel(notif);
+        }
+    }
+
+    /// Sets a config knob on the remote session. Sound because the choices the client is
+    /// picking from came from the remote in the first place: session/load returns the
+    /// REMOTE's configOptions for a federated session, so the write goes back to the node
+    /// that offered them. The response is the remote's refreshed configOptions, passed
+    /// through unchanged (it carries no session ids to rewrite).
+    pub(super) async fn set_config_option(
+        &self,
+        peer: &str,
+        remote_id: &str,
+        mut req: SetSessionConfigOptionRequest,
+    ) -> Result<SetSessionConfigOptionResponse, agent_client_protocol::Error> {
+        req.session_id = SessionId::new(remote_id.to_string());
+        match tokio::time::timeout(PEER_LOAD_TIMEOUT, self.peer(peer)?.set_config_option(req)).await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                warn!(peer = %peer, %remote_id, "roam peer set_config_option timed out");
+                Err(peer::offline(peer))
+            }
+        }
+    }
+
+    pub(super) async fn rename_session(
+        &self,
+        peer: &str,
+        remote_id: &str,
+        mut req: RenameSessionRequest,
+    ) -> Result<EmptyResponse, agent_client_protocol::Error> {
+        req.session_id = remote_id.to_string();
+        self.manage(peer, "rename", self.peer(peer)?.rename_session(req))
+            .await
+    }
+
+    pub(super) async fn archive_session(
+        &self,
+        peer: &str,
+        remote_id: &str,
+        mut req: ArchiveSessionRequest,
+    ) -> Result<EmptyResponse, agent_client_protocol::Error> {
+        req.session_id = remote_id.to_string();
+        self.manage(peer, "archive", self.peer(peer)?.archive_session(req))
+            .await
+    }
+
+    pub(super) async fn delete_session(
+        &self,
+        peer: &str,
+        remote_id: &str,
+        mut req: DeleteSessionRequest,
+    ) -> Result<EmptyResponse, agent_client_protocol::Error> {
+        req.session_id = remote_id.to_string();
+        self.manage(peer, "delete", self.peer(peer)?.delete_session(req))
+            .await
+    }
+
+    /// Shared timeout wrapper for the quick session-management calls.
+    async fn manage(
+        &self,
+        peer: &str,
+        operation: &str,
+        call: impl std::future::Future<Output = Result<EmptyResponse, agent_client_protocol::Error>>,
+    ) -> Result<EmptyResponse, agent_client_protocol::Error> {
+        match tokio::time::timeout(PEER_MANAGE_TIMEOUT, call).await {
+            Ok(result) => result,
+            Err(_) => {
+                warn!(peer = %peer, %operation, "roam peer session management call timed out");
+                Err(peer::offline(peer))
+            }
         }
     }
 

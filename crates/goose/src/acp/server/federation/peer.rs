@@ -10,10 +10,14 @@
 //! `acp::provider`. That is not decoration: the ACP connection future is not `Send`, so it
 //! cannot live on the shared tokio pool.
 
+use crate::acp::custom_requests::{
+    ArchiveSessionRequest, DeleteSessionRequest, EmptyResponse, RenameSessionRequest,
+};
 use agent_client_protocol::schema::v1::{
     CancelNotification, ClientCapabilities, InitializeRequest, InitializeResponse,
     ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
     PromptRequest, PromptResponse, RequestPermissionRequest, SessionId, SessionNotification,
+    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
 };
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::{Agent, Client, ConnectionTo};
@@ -47,6 +51,22 @@ pub(super) enum PeerCall {
     ),
     Prompt(PromptRequest, oneshot::Sender<AcpResult<PromptResponse>>),
     Cancel(CancelNotification),
+    SetConfigOption(
+        SetSessionConfigOptionRequest,
+        oneshot::Sender<AcpResult<SetSessionConfigOptionResponse>>,
+    ),
+    RenameSession(
+        RenameSessionRequest,
+        oneshot::Sender<AcpResult<EmptyResponse>>,
+    ),
+    ArchiveSession(
+        ArchiveSessionRequest,
+        oneshot::Sender<AcpResult<EmptyResponse>>,
+    ),
+    DeleteSession(
+        DeleteSessionRequest,
+        oneshot::Sender<AcpResult<EmptyResponse>>,
+    ),
 }
 
 /// A handle to one federated peer. Cheap to clone-by-reference; the connection itself lives
@@ -125,6 +145,34 @@ impl Peer {
 
     pub(super) async fn prompt(&self, req: PromptRequest) -> AcpResult<PromptResponse> {
         self.call(|tx| PeerCall::Prompt(req, tx)).await
+    }
+
+    pub(super) async fn set_config_option(
+        &self,
+        req: SetSessionConfigOptionRequest,
+    ) -> AcpResult<SetSessionConfigOptionResponse> {
+        self.call(|tx| PeerCall::SetConfigOption(req, tx)).await
+    }
+
+    pub(super) async fn rename_session(
+        &self,
+        req: RenameSessionRequest,
+    ) -> AcpResult<EmptyResponse> {
+        self.call(|tx| PeerCall::RenameSession(req, tx)).await
+    }
+
+    pub(super) async fn archive_session(
+        &self,
+        req: ArchiveSessionRequest,
+    ) -> AcpResult<EmptyResponse> {
+        self.call(|tx| PeerCall::ArchiveSession(req, tx)).await
+    }
+
+    pub(super) async fn delete_session(
+        &self,
+        req: DeleteSessionRequest,
+    ) -> AcpResult<EmptyResponse> {
+        self.call(|tx| PeerCall::DeleteSession(req, tx)).await
     }
 
     /// Cancel is a notification: fire-and-forget, and silently dropped when the peer is
@@ -281,18 +329,30 @@ async fn run_connection(
 
             // Only this task ever consumes the queue, so holding the lock for the life of
             // the connection is intentional rather than contended.
+            // Each request runs as its own spawned task: the jsonrpc layer multiplexes by
+            // id, so nothing forces serialization — and awaiting inline here did exactly
+            // that, parking a session/list behind a minutes-long remote prompt until the
+            // caller's timeout wrote the peer off as dead.
+            macro_rules! forward {
+                ($req:expr, $tx:expr) => {{
+                    let (req, tx) = ($req, $tx);
+                    let cx2 = cx.clone();
+                    cx.spawn(async move {
+                        let _ = tx.send(cx2.send_request(req).block_task().await);
+                        Ok(())
+                    })?;
+                }};
+            }
             let mut calls = loop_calls.lock().await;
             while let Some(call) = calls.recv().await {
                 match call {
-                    PeerCall::ListSessions(req, tx) => {
-                        let _ = tx.send(cx.send_request(req).block_task().await);
-                    }
-                    PeerCall::LoadSession(req, tx) => {
-                        let _ = tx.send(cx.send_request(req).block_task().await);
-                    }
-                    PeerCall::Prompt(req, tx) => {
-                        let _ = tx.send(cx.send_request(req).block_task().await);
-                    }
+                    PeerCall::ListSessions(req, tx) => forward!(req, tx),
+                    PeerCall::LoadSession(req, tx) => forward!(req, tx),
+                    PeerCall::Prompt(req, tx) => forward!(req, tx),
+                    PeerCall::SetConfigOption(req, tx) => forward!(req, tx),
+                    PeerCall::RenameSession(req, tx) => forward!(req, tx),
+                    PeerCall::ArchiveSession(req, tx) => forward!(req, tx),
+                    PeerCall::DeleteSession(req, tx) => forward!(req, tx),
                     PeerCall::Cancel(notif) => {
                         let _ = cx.send_notification(notif);
                     }

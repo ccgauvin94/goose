@@ -99,6 +99,9 @@ impl GooseAcpAgent {
         &self,
         req: DeleteSessionRequest,
     ) -> Result<EmptyResponse, agent_client_protocol::Error> {
+        if let Some((federation, peer, remote)) = self.federated_target(&req.session_id)? {
+            return federation.delete_session(&peer, &remote, req).await;
+        }
         self.session_manager
             .delete_session(&req.session_id)
             .await
@@ -288,6 +291,9 @@ impl GooseAcpAgent {
         &self,
         req: RenameSessionRequest,
     ) -> Result<EmptyResponse, agent_client_protocol::Error> {
+        if let Some((federation, peer, remote)) = self.federated_target(&req.session_id)? {
+            return federation.rename_session(&peer, &remote, req).await;
+        }
         self.session_manager
             .update(&req.session_id)
             .user_provided_name(req.title)
@@ -301,6 +307,9 @@ impl GooseAcpAgent {
         &self,
         req: ArchiveSessionRequest,
     ) -> Result<EmptyResponse, agent_client_protocol::Error> {
+        if let Some((federation, peer, remote)) = self.federated_target(&req.session_id)? {
+            return federation.archive_session(&peer, &remote, req).await;
+        }
         self.session_manager
             .update(&req.session_id)
             .archived_at(Some(chrono::Utc::now()))

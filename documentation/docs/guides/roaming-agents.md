@@ -264,10 +264,11 @@ than failing, so one machine being asleep does not break the others.
 
 - **Start remote sessions.** New sessions are always created locally. You can
   see and continue a peer's sessions, not open one there.
-- **Change a remote session's model, mode or thinking effort**, or fork or close
-  it. Those are refused with an explanatory error rather than applied to the
-  wrong machine: your client's model picker is populated from *this* server's
-  provider inventory, and the peer may not have any of those models.
+- **Fork, close or steer a remote session**, or manage its tools and extensions.
+  Those are refused with an explanatory error rather than half-forwarded.
+  Config knobs (model, mode, thinking effort) and rename/archive/delete DO
+  route to the peer: the options your client picks from came from the peer via
+  `session/load`, so the write goes back to the node that offered the choices.
 - **Page through a large peer.** Each peer contributes its first page, on your
   first page only. A peer with more sessions than fit has its tail invisible;
   the server logs when this happens.

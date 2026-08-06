@@ -116,6 +116,23 @@ impl HandleDispatchFrom<Client> for GooseAcpHandler {
                         let cx_spawn = cx.clone();
                         cx.spawn(async move {
                             let cx = cx_spawn;
+                            // A federated session's knobs live on its peer; the choices the
+                            // client picked from came from there via session/load, so the
+                            // write is routed back rather than refused (see federation).
+                            match agent.federated_target(req.session_id.0.as_ref()) {
+                                Err(e) => {
+                                    responder.respond_with_error(e)?;
+                                    return Ok(());
+                                }
+                                Ok(Some((federation, peer, remote))) => {
+                                    match federation.set_config_option(&peer, &remote, req).await {
+                                        Ok(response) => responder.respond(response)?,
+                                        Err(e) => responder.respond_with_error(e)?,
+                                    }
+                                    return Ok(());
+                                }
+                                Ok(None) => {}
+                            }
                             let value_id = match req.value.as_value_id() {
                                 Some(value_id) => value_id.clone(),
                                 None => {
