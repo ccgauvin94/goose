@@ -383,6 +383,7 @@ pub async fn spawn_acp_server_in_process(
         additional_source_roots: Vec::new(),
         session_cwd: None,
         scheduler: Some(Arc::new(FixtureScheduler::new())),
+        federation: None,
     })
     .await
     .unwrap();

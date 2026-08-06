@@ -220,6 +220,14 @@ impl GooseAcpAgent {
                 encode_session_list_cursor(cursor, cwd, &session_types, keyword.as_deref())
             })
             .transpose()?;
-        Ok(ListSessionsResponse::new(session_infos).next_cursor(next_cursor))
+        let response = ListSessionsResponse::new(session_infos).next_cursor(next_cursor);
+
+        // Roam peers append to the local page. The cursor above stays the LOCAL cursor:
+        // paging forward keeps walking this machine's sessions, and remote ones appear
+        // once, on the first page.
+        let Some(federation) = self.federation.as_ref() else {
+            return Ok(response);
+        };
+        Ok(federation.merge_sessions(&req, response).await)
     }
 }

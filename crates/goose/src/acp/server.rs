@@ -94,6 +94,7 @@ mod dictation;
 mod dispatch;
 mod elicitation;
 mod extensions;
+pub mod federation;
 mod fork_session;
 mod list_sessions;
 mod load_session;
@@ -196,6 +197,9 @@ pub struct GooseAcpAgentOptions {
     /// When set, new sessions use this host-controlled working directory instead
     /// of the `cwd` the connecting client sends (see `AcpServerFactoryConfig`).
     pub session_cwd: Option<std::path::PathBuf>,
+    /// Roam peers whose sessions are merged into this server's. Shared across every
+    /// client connection — the peer pool must outlive any one of them.
+    pub federation: Option<Arc<federation::Federation>>,
 }
 
 pub struct GooseAcpAgent {
@@ -222,6 +226,7 @@ pub struct GooseAcpAgent {
     additional_source_roots: Vec<SourceRoot>,
     session_cwd: Option<PathBuf>,
     recipe_path_cache: Arc<Mutex<HashMap<String, PathBuf>>>,
+    federation: Option<Arc<federation::Federation>>,
 }
 
 fn meta_string(
@@ -665,7 +670,41 @@ impl GooseAcpAgent {
             additional_source_roots: options.additional_source_roots,
             session_cwd: options.session_cwd,
             recipe_path_cache: Arc::new(Mutex::new(HashMap::new())),
+            federation: options.federation,
         })
+    }
+
+    /// Routes a session id that names a remote peer, or `None` if it is a local session.
+    ///
+    /// Returns an error (rather than `None`) for an id that *looks* federated but names a
+    /// peer we do not have: falling through to the local store would report "no such
+    /// session", which sends you looking in the wrong machine's logs.
+    fn federated_target(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<(Arc<federation::Federation>, String, String)>, agent_client_protocol::Error>
+    {
+        let Some((peer, remote)) = federation::split_federated_id(session_id) else {
+            return Ok(None);
+        };
+        let Some(federation) = self.federation.clone() else {
+            return Err(agent_client_protocol::Error::resource_not_found(Some(
+                format!("session `{session_id}` names a roam peer, but federation is off"),
+            )));
+        };
+        Ok(Some((federation, peer.to_string(), remote.to_string())))
+    }
+
+    /// Rejects an operation v1 does not federate, naming why rather than failing opaquely.
+    fn unsupported_for_federated(
+        operation: &str,
+        session_id: &str,
+    ) -> agent_client_protocol::Error {
+        agent_client_protocol::Error::invalid_params().data(format!(
+            "{operation} is not supported for the federated session `{session_id}`: it \
+             lives on another machine whose provider and model configuration this server \
+             does not have"
+        ))
     }
 
     fn config(&self) -> Result<&'static Config, agent_client_protocol::Error> {
@@ -1527,6 +1566,17 @@ impl GooseAcpAgent {
         &self,
         session_id: &str,
     ) -> Result<Arc<Agent>, agent_client_protocol::Error> {
+        // A federated session has no local agent, and never will. Refusing at the one
+        // place every handler resolves an agent means set_model, set_mode, steer, tools,
+        // extensions and the rest all fail with the same clear reason — and a handler
+        // added later inherits it rather than silently looking in the wrong store.
+        if federation::split_federated_id(session_id).is_some() {
+            return Err(Self::unsupported_for_federated(
+                "this operation",
+                session_id,
+            ));
+        }
+
         if self.closed_session_ids.lock().await.contains(session_id) {
             return Err(agent_client_protocol::Error::resource_not_found(Some(
                 session_id.to_string(),
@@ -1750,6 +1800,11 @@ impl GooseAcpAgent {
         cx: &ConnectionTo<Client>,
         args: LoadSessionRequest,
     ) -> Result<LoadSessionResponse, agent_client_protocol::Error> {
+        if let Some((federation, peer, remote)) =
+            self.federated_target(args.session_id.0.as_ref())?
+        {
+            return federation.load_session(&peer, &remote, args).await;
+        }
         self.handle_load_session(cx, args).await
     }
 
@@ -1760,6 +1815,13 @@ impl GooseAcpAgent {
     ) -> Result<PromptResponse, agent_client_protocol::Error> {
         // The ACP session_id IS the thread ID.
         let session_id = args.session_id.0.to_string();
+
+        // A federated prompt runs on the remote, so none of the local run bookkeeping
+        // below applies: cancellation is forwarded as a notification, not driven by a
+        // local CancellationToken.
+        if let Some((federation, peer, remote)) = self.federated_target(&session_id)? {
+            return federation.prompt(&peer, &remote, args).await;
+        }
 
         let run_id = format!("run_{}", Uuid::new_v4());
         let cancel_token = CancellationToken::new();
@@ -2017,6 +2079,12 @@ impl GooseAcpAgent {
         debug!(?args, "cancel request");
 
         let session_id = args.session_id.0.to_string();
+
+        if let Some((federation, peer, remote)) = self.federated_target(&session_id)? {
+            federation.cancel(&peer, &remote, args);
+            return Ok(());
+        }
+
         let token = {
             let active_prompt_runs = self.active_prompt_runs.lock().await;
             active_prompt_runs

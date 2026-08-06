@@ -1,3 +1,4 @@
+use crate::acp::server::federation::Federation;
 use crate::acp::server::{
     AcpBuiltinSelection, AcpProviderFactory, GooseAcpAgent, GooseAcpAgentOptions,
 };
@@ -26,12 +27,17 @@ pub struct AcpServerFactoryConfig {
 pub struct AcpServer {
     config: AcpServerFactoryConfig,
     scheduler: OnceCell<Arc<dyn SchedulerTrait>>,
+    /// The roam peer pool, built once and shared by every connection. `Option` inside the
+    /// cell because "federation is configured off" is a resolved answer worth caching, not
+    /// a reason to re-read config on every connect.
+    federation: OnceCell<Option<Arc<Federation>>>,
 }
 
 impl AcpServer {
     pub fn new(config: AcpServerFactoryConfig) -> Self {
         Self {
             config,
+            federation: OnceCell::new(),
             scheduler: OnceCell::new(),
         }
     }
@@ -62,6 +68,14 @@ impl AcpServer {
             .await
             .cloned()
             .map(Some)
+    }
+
+    /// Starts the roam peer pool on first use and reuses it thereafter. Dialling once per
+    /// client connection would leave a bridge subprocess per connection behind.
+    async fn federation(&self) -> &Option<Arc<Federation>> {
+        self.federation
+            .get_or_init(|| async { Federation::from_config() })
+            .await
     }
 
     pub async fn create_agent(&self) -> Result<Arc<GooseAcpAgent>> {
@@ -100,6 +114,7 @@ impl AcpServer {
             additional_source_roots: self.config.additional_source_roots.clone(),
             session_cwd: self.config.session_cwd.clone(),
             scheduler,
+            federation: self.federation().await.clone(),
         })
         .await?;
         info!("Created new ACP agent");

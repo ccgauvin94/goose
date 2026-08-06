@@ -23,6 +23,13 @@ impl HandleDispatchFrom<Client> for GooseAcpHandler {
             // connection; the result is ignored on later requests.
             let _ = agent.client_cx.set(cx.clone());
 
+            // Point the roam peer pump at this connection. Unlike client_cx this is NOT
+            // set-once: the pool outlives any single client, so a reconnecting client has
+            // to take over delivery or remote notifications keep going to a dead handle.
+            if let Some(federation) = agent.federation.as_ref() {
+                federation.register_client(cx.clone());
+            }
+
             // InitializeRequest runs inline: it sets connection-scoped state
             // (client fs/terminal capabilities) that later handlers read with
             // defaults, so a pipelined NewSessionRequest must not race ahead of it.

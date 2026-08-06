@@ -228,6 +228,52 @@ one — e.g. run a build on the machine that has the toolchain, then bring the
 result back. Each delegation is a self-contained task with a bounded response,
 so this composes into multi-machine workflows without any shared state.
 
+## Federating peers into `goose serve`
+
+`bridge` points *one* ACP client at *one* remote agent. Federation is the other
+direction: it folds a peer's sessions into a `goose serve` this machine already
+runs, so every client attached to that server — Desktop, the CLI, a phone —
+sees remote sessions in its normal session list without knowing roam exists.
+
+Accept the peer first (federation does not bypass the trust check), then name it:
+
+```bash
+# on the machine running `goose serve`
+goose roam peers accept "goose+roam://…" laptop
+GOOSE_ROAM_FEDERATE=laptop goose serve
+```
+
+Or set it permanently in `~/.config/goose/config.yaml`:
+
+```yaml
+roam_federate:
+  - laptop
+  - workstation
+```
+
+Sessions from `laptop` now appear alongside local ones, addressed as
+`roam:laptop:<id>`. Opening one and prompting it runs on the laptop, against the
+laptop's model, files and extensions; streamed output and permission prompts come
+back to whichever client is attached.
+
+Peers are dialled once per server, not once per client, and a peer that is
+offline simply contributes nothing — the session list comes back short rather
+than failing, so one machine being asleep does not break the others.
+
+### What federation does not do
+
+- **Start remote sessions.** New sessions are always created locally. You can
+  see and continue a peer's sessions, not open one there.
+- **Change a remote session's model, mode or thinking effort**, or fork or close
+  it. Those are refused with an explanatory error rather than applied to the
+  wrong machine: your client's model picker is populated from *this* server's
+  provider inventory, and the peer may not have any of those models.
+- **Page through a large peer.** Each peer contributes its first page, on your
+  first page only. A peer with more sessions than fit has its tail invisible;
+  the server logs when this happens.
+- **Serve two clients independently.** Remote notifications follow the most
+  recently connected client.
+
 ## Notes and limits
 
 - Peers connect directly when NAT hole-punching succeeds and fall back to
