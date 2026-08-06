@@ -41,6 +41,7 @@ use agent_client_protocol::schema::v1::{
 };
 use agent_client_protocol::{Client, ConnectionTo};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 
@@ -54,6 +55,17 @@ const FEDERATED_PREFIX: &str = "roam:";
 /// the oldest are dropped. Notifications are advisory; a client that cannot keep up would
 /// rather lose stream chunks than stall the remote agent.
 const EVENT_QUEUE: usize = 256;
+
+/// How long a peer gets to answer session/list before it is treated as offline for this
+/// merge. `is_online()` is necessary but not sufficient: a share restart on the remote can
+/// leave the bridge connection dead without the child noticing, and an unbounded await here
+/// wedged EVERY client's session/list at once (observed 2026-08-06, recovered only by
+/// restarting serve). A slow peer losing its page beats one stale peer freezing the server.
+const PEER_LIST_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// session/load replays a whole transcript, so it gets more room than list — but the same
+/// dead-connection hang applies, and a client stuck on load looks identical to a hung app.
+const PEER_LOAD_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Builds the id a client sees for a session that lives on `peer`.
 pub(super) fn federated_id(peer: &str, remote: &str) -> String {
@@ -151,7 +163,13 @@ impl Federation {
         mut req: LoadSessionRequest,
     ) -> Result<LoadSessionResponse, agent_client_protocol::Error> {
         req.session_id = SessionId::new(remote_id.to_string());
-        self.peer(peer)?.load_session(req).await
+        match tokio::time::timeout(PEER_LOAD_TIMEOUT, self.peer(peer)?.load_session(req)).await {
+            Ok(result) => result,
+            Err(_) => {
+                warn!(peer = %peer, %remote_id, "roam peer session load timed out");
+                Err(peer::offline(peer))
+            }
+        }
     }
 
     pub(super) async fn prompt(
@@ -196,8 +214,14 @@ impl Federation {
             remote_req.cwd = req.cwd.clone();
             remote_req.meta = req.meta.clone();
 
-            match peer.list_sessions(remote_req).await {
-                Ok(response) => {
+            match tokio::time::timeout(PEER_LIST_TIMEOUT, peer.list_sessions(remote_req)).await {
+                Err(_) => {
+                    warn!(
+                        peer = %peer.name,
+                        "roam peer session list timed out; omitting its sessions from this page"
+                    );
+                }
+                Ok(Ok(response)) => {
                     if response.next_cursor.is_some() {
                         warn!(
                             peer = %peer.name,
@@ -212,7 +236,7 @@ impl Federation {
                             .map(|info| rewrite(&peer.name, info)),
                     );
                 }
-                Err(error) => {
+                Ok(Err(error)) => {
                     warn!(peer = %peer.name, ?error, "roam peer session list failed");
                 }
             }
