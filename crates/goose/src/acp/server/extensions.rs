@@ -8,6 +8,9 @@ impl GooseAcpAgent {
         &self,
         req: AddSessionExtensionRequest,
     ) -> Result<EmptyResponse, agent_client_protocol::Error> {
+        if let Some((federation, peer, remote)) = self.federated_target(&req.session_id)? {
+            return federation.add_session_extension(&peer, &remote, req).await;
+        }
         let session_id = &req.session_id;
         let config = goose_extension_to_config_without_secrets(req.extension)?;
         let agent = self.get_session_agent(&req.session_id).await?;
@@ -22,6 +25,11 @@ impl GooseAcpAgent {
         &self,
         req: RemoveSessionExtensionRequest,
     ) -> Result<EmptyResponse, agent_client_protocol::Error> {
+        if let Some((federation, peer, remote)) = self.federated_target(&req.session_id)? {
+            return federation
+                .remove_session_extension(&peer, &remote, req)
+                .await;
+        }
         let session_id = &req.session_id;
         let agent = self.get_session_agent(&req.session_id).await?;
         agent
@@ -111,6 +119,11 @@ impl GooseAcpAgent {
         &self,
         req: GetSessionExtensionsRequest,
     ) -> Result<GetSessionExtensionsResponse, agent_client_protocol::Error> {
+        if let Some((federation, peer, remote)) = self.federated_target(&req.session_id)? {
+            return federation
+                .list_session_extensions(&peer, &remote, req)
+                .await;
+        }
         let session_id = &req.session_id;
         let session = self
             .session_manager

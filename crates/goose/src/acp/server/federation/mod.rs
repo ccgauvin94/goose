@@ -16,12 +16,15 @@
 //! ## What federates, and what it refuses
 //!
 //! Routed: `session/list`, `session/load`, `session/prompt`, `session/cancel`,
-//! `session/set_config_option`, rename/archive/delete, and permission requests coming
-//! back the other way. set_config_option is sound to route because the options the
-//! client picks from came from the remote via `session/load` — the write goes back to
-//! the node that offered the choices. Everything else — fork, close, steer, tools,
-//! extensions — is refused with a clear error for a federated id rather than being
-//! half-forwarded.
+//! `session/set_config_option`, rename/archive/delete, the session-scoped tool and
+//! extension methods (`tools/list`, `session/extensions/list|add|remove`), and
+//! permission requests coming back the other way. set_config_option is sound to route
+//! because the options the client picks from came from the remote via `session/load` —
+//! the write goes back to the node that offered the choices. The same argument covers
+//! extensions/add: a client toggling remote tools round-trips extension objects it got
+//! from the remote's own extensions/list. Everything else — fork, close, steer, and the
+//! global (non-session-scoped) config methods — is refused with a clear error for a
+//! federated id rather than being half-forwarded.
 //!
 //! ## Pagination is deliberately shallow
 //!
@@ -34,7 +37,9 @@
 mod peer;
 
 use crate::acp::custom_requests::{
-    ArchiveSessionRequest, DeleteSessionRequest, EmptyResponse, RenameSessionRequest,
+    AddSessionExtensionRequest, ArchiveSessionRequest, DeleteSessionRequest, EmptyResponse,
+    GetSessionExtensionsRequest, GetSessionExtensionsResponse, GetToolsRequest, GetToolsResponse,
+    RemoveSessionExtensionRequest, RenameSessionRequest,
 };
 use agent_client_protocol::schema::v1::{
     CancelNotification, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
@@ -70,8 +75,9 @@ const PEER_LIST_TIMEOUT: Duration = Duration::from_secs(5);
 /// dead-connection hang applies, and a client stuck on load looks identical to a hung app.
 const PEER_LOAD_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// rename/archive/delete are single-row session-store writes on the remote; ten seconds is
-/// generous for anything but a dead connection.
+/// rename/archive/delete are single-row session-store writes on the remote, and the tool/
+/// extension calls are in-memory lookups plus at most one extension (re)start; ten seconds
+/// is generous for anything but a dead connection.
 const PEER_MANAGE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Builds the id a client sees for a session that lives on `peer`.
@@ -251,13 +257,78 @@ impl Federation {
             .await
     }
 
-    /// Shared timeout wrapper for the quick session-management calls.
-    async fn manage(
+    /// Lists the tools active in the remote session. Read-only; the response carries no
+    /// session ids to rewrite.
+    pub(super) async fn list_tools(
+        &self,
+        peer: &str,
+        remote_id: &str,
+        mut req: GetToolsRequest,
+    ) -> Result<GetToolsResponse, agent_client_protocol::Error> {
+        req.session_id = remote_id.to_string();
+        self.manage(peer, "tools/list", self.peer(peer)?.list_tools(req))
+            .await
+    }
+
+    /// Lists the extensions attached to the remote session, as the REMOTE's own extension
+    /// objects — which is what makes add_session_extension below sound: a client editing a
+    /// remote session's tool allowlist round-trips objects it got from here.
+    pub(super) async fn list_session_extensions(
+        &self,
+        peer: &str,
+        remote_id: &str,
+        mut req: GetSessionExtensionsRequest,
+    ) -> Result<GetSessionExtensionsResponse, agent_client_protocol::Error> {
+        req.session_id = remote_id.to_string();
+        self.manage(
+            peer,
+            "extensions/list",
+            self.peer(peer)?.list_session_extensions(req),
+        )
+        .await
+    }
+
+    /// Session-scoped on the remote: touches that session's extension_data, never the
+    /// peer's config.yaml. The extension object should originate from the peer's own
+    /// extensions/list — a local extension config can name commands that don't exist
+    /// there, and the remote will report that failure itself.
+    pub(super) async fn add_session_extension(
+        &self,
+        peer: &str,
+        remote_id: &str,
+        mut req: AddSessionExtensionRequest,
+    ) -> Result<EmptyResponse, agent_client_protocol::Error> {
+        req.session_id = remote_id.to_string();
+        self.manage(
+            peer,
+            "extensions/add",
+            self.peer(peer)?.add_session_extension(req),
+        )
+        .await
+    }
+
+    pub(super) async fn remove_session_extension(
+        &self,
+        peer: &str,
+        remote_id: &str,
+        mut req: RemoveSessionExtensionRequest,
+    ) -> Result<EmptyResponse, agent_client_protocol::Error> {
+        req.session_id = remote_id.to_string();
+        self.manage(
+            peer,
+            "extensions/remove",
+            self.peer(peer)?.remove_session_extension(req),
+        )
+        .await
+    }
+
+    /// Shared timeout wrapper for the quick session-scoped management calls.
+    async fn manage<T>(
         &self,
         peer: &str,
         operation: &str,
-        call: impl std::future::Future<Output = Result<EmptyResponse, agent_client_protocol::Error>>,
-    ) -> Result<EmptyResponse, agent_client_protocol::Error> {
+        call: impl std::future::Future<Output = Result<T, agent_client_protocol::Error>>,
+    ) -> Result<T, agent_client_protocol::Error> {
         match tokio::time::timeout(PEER_MANAGE_TIMEOUT, call).await {
             Ok(result) => result,
             Err(_) => {

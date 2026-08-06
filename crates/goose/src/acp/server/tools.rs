@@ -10,6 +10,9 @@ impl GooseAcpAgent {
         &self,
         req: GetToolsRequest,
     ) -> Result<GetToolsResponse, agent_client_protocol::Error> {
+        if let Some((federation, peer, remote)) = self.federated_target(&req.session_id)? {
+            return federation.list_tools(&peer, &remote, req).await;
+        }
         let session_id = &req.session_id;
         let agent = self.get_session_agent(&req.session_id).await?;
         let goose_mode = agent.goose_mode().await;

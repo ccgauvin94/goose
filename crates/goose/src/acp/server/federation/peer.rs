@@ -11,7 +11,9 @@
 //! cannot live on the shared tokio pool.
 
 use crate::acp::custom_requests::{
-    ArchiveSessionRequest, DeleteSessionRequest, EmptyResponse, RenameSessionRequest,
+    AddSessionExtensionRequest, ArchiveSessionRequest, DeleteSessionRequest, EmptyResponse,
+    GetSessionExtensionsRequest, GetSessionExtensionsResponse, GetToolsRequest, GetToolsResponse,
+    RemoveSessionExtensionRequest, RenameSessionRequest,
 };
 use agent_client_protocol::schema::v1::{
     CancelNotification, ClientCapabilities, InitializeRequest, InitializeResponse,
@@ -65,6 +67,22 @@ pub(super) enum PeerCall {
     ),
     DeleteSession(
         DeleteSessionRequest,
+        oneshot::Sender<AcpResult<EmptyResponse>>,
+    ),
+    ListTools(
+        GetToolsRequest,
+        oneshot::Sender<AcpResult<GetToolsResponse>>,
+    ),
+    ListSessionExtensions(
+        GetSessionExtensionsRequest,
+        oneshot::Sender<AcpResult<GetSessionExtensionsResponse>>,
+    ),
+    AddSessionExtension(
+        AddSessionExtensionRequest,
+        oneshot::Sender<AcpResult<EmptyResponse>>,
+    ),
+    RemoveSessionExtension(
+        RemoveSessionExtensionRequest,
         oneshot::Sender<AcpResult<EmptyResponse>>,
     ),
 }
@@ -173,6 +191,33 @@ impl Peer {
         req: DeleteSessionRequest,
     ) -> AcpResult<EmptyResponse> {
         self.call(|tx| PeerCall::DeleteSession(req, tx)).await
+    }
+
+    pub(super) async fn list_tools(&self, req: GetToolsRequest) -> AcpResult<GetToolsResponse> {
+        self.call(|tx| PeerCall::ListTools(req, tx)).await
+    }
+
+    pub(super) async fn list_session_extensions(
+        &self,
+        req: GetSessionExtensionsRequest,
+    ) -> AcpResult<GetSessionExtensionsResponse> {
+        self.call(|tx| PeerCall::ListSessionExtensions(req, tx))
+            .await
+    }
+
+    pub(super) async fn add_session_extension(
+        &self,
+        req: AddSessionExtensionRequest,
+    ) -> AcpResult<EmptyResponse> {
+        self.call(|tx| PeerCall::AddSessionExtension(req, tx)).await
+    }
+
+    pub(super) async fn remove_session_extension(
+        &self,
+        req: RemoveSessionExtensionRequest,
+    ) -> AcpResult<EmptyResponse> {
+        self.call(|tx| PeerCall::RemoveSessionExtension(req, tx))
+            .await
     }
 
     /// Cancel is a notification: fire-and-forget, and silently dropped when the peer is
@@ -353,6 +398,10 @@ async fn run_connection(
                     PeerCall::RenameSession(req, tx) => forward!(req, tx),
                     PeerCall::ArchiveSession(req, tx) => forward!(req, tx),
                     PeerCall::DeleteSession(req, tx) => forward!(req, tx),
+                    PeerCall::ListTools(req, tx) => forward!(req, tx),
+                    PeerCall::ListSessionExtensions(req, tx) => forward!(req, tx),
+                    PeerCall::AddSessionExtension(req, tx) => forward!(req, tx),
+                    PeerCall::RemoveSessionExtension(req, tx) => forward!(req, tx),
                     PeerCall::Cancel(notif) => {
                         let _ = cx.send_notification(notif);
                     }
