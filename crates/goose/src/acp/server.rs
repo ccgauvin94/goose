@@ -206,6 +206,52 @@ pub struct ActivePromptRun {
 /// one session.
 pub type ActiveRunRegistry = Arc<Mutex<HashMap<String, ActivePromptRun>>>;
 
+/// Drop-safety for the active-run registry. The prompt turn runs as a
+/// connection-scoped task: when the connection dies the task is dropped at
+/// whatever await point it is parked on, skipping every explicit
+/// `clear_active_run` call site — and the leaked entry rejects all future
+/// prompts on that session ("session already has active run") until the
+/// process restarts, since the registry is shared across connections. This
+/// guard spawns the same cleanup on Drop; on the normal completion paths the
+/// explicit call has already emptied the entry and the spawned pass no-ops
+/// (run-id checked, so it can never clear a successor run).
+struct ActiveRunGuard {
+    registry: ActiveRunRegistry,
+    session_id: String,
+    run_id: String,
+}
+
+impl Drop for ActiveRunGuard {
+    fn drop(&mut self) {
+        let registry = self.registry.clone();
+        let session_id = std::mem::take(&mut self.session_id);
+        let run_id = std::mem::take(&mut self.run_id);
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        handle.spawn(async move {
+            let agent = {
+                let mut runs = registry.lock().await;
+                match runs.get(&session_id) {
+                    Some(run) if run.run_id == run_id => {
+                        run.cancel_token.cancel();
+                        runs.remove(&session_id).map(|run| run.agent)
+                    }
+                    _ => None,
+                }
+            };
+            if let Some(agent) = agent {
+                agent.discard_pending_steers(&session_id).await;
+                tracing::warn!(
+                    session_id,
+                    run_id,
+                    "active run cleared by drop guard (prompt task dropped mid-turn)"
+                );
+            }
+        });
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct AcpBuiltinSelection {
     pub defaults: Vec<String>,
@@ -1918,6 +1964,11 @@ impl GooseAcpAgent {
             agent.clone(),
         )
         .await?;
+        let _active_run_guard = ActiveRunGuard {
+            registry: self.active_prompt_runs.clone(),
+            session_id: session_id.clone(),
+            run_id: run_id.clone(),
+        };
 
         if cancel_token.is_cancelled() {
             self.clear_active_run(&session_id, &run_id).await;
