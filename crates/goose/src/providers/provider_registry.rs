@@ -85,6 +85,18 @@ impl ProviderEntry {
         {
             model.supports_vision = Some(supports_vision);
         }
+        // The reasoning counterpart. Nothing applied a declared `models[].reasoning` here, so a
+        // custom provider could set `"reasoning": true` and goose would still derive reasoning
+        // from the canonical registry and the OpenAI-name heuristic alone - the effort selector
+        // appeared but sent no `reasoning_effort`. `ModelInfo.reasoning` is a plain bool, so
+        // "declared false" and "not declared" are indistinguishable: only an explicit true
+        // overrides, everything else keeps what materialization already derived.
+        if find_declared_model(&self.metadata.known_models, &model.model_name)
+            .map(|m| m.reasoning)
+            .unwrap_or(false)
+        {
+            model.reasoning = Some(true);
+        }
         crate::model_config::materialize_model_config(&self.metadata.name, model)
     }
 
