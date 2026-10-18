@@ -1759,7 +1759,18 @@ pub fn create_request_for_model_with_options(
         model_config
             .thinking_effort()
             .map_or(legacy_reasoning_effort, |effort| {
-                openai_reasoning_effort_for_thinking(&model_name, effort)
+                // A model the provider explicitly declares as reasoning (`models[].reasoning`)
+                // whose name is not OpenAI-shaped: we have no per-model capability table for it,
+                // so pass the chosen level through instead of clamping it to the conservative
+                // low/medium/high set. Without this, "Off" maps to "low" and "Max" to "high", so
+                // a local engine that accepts none/low/medium/high/xhigh can never be dialled
+                // outside those three - and can never actually be turned off.
+                if model_config.reasoning == Some(true) && !is_openai_responses_model(&model_name)
+                {
+                    Some(declared_effort_level(effort))
+                } else {
+                    openai_reasoning_effort_for_thinking(&model_name, effort)
+                }
             })
     } else if supports_xai_effort {
         model_config
@@ -1929,6 +1940,20 @@ pub fn xai_reasoning_effort_for_thinking(
             Some("high".to_string())
         }
     }
+}
+
+/// The wire value for a model the provider declares as reasoning but that we have no capability
+/// table for. `openai_reasoning_efforts_for_model` only knows OpenAI-shaped names and otherwise
+/// clamps to low/medium/high, which loses both "off" and the top of the ladder.
+fn declared_effort_level(effort: ThinkingEffort) -> String {
+    match effort {
+        ThinkingEffort::Off => "none",
+        ThinkingEffort::Low => "low",
+        ThinkingEffort::Medium => "medium",
+        ThinkingEffort::High => "high",
+        ThinkingEffort::Max => "xhigh",
+    }
+    .to_string()
 }
 
 pub fn openai_reasoning_effort_for_thinking(
