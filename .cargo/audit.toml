@@ -1,0 +1,27 @@
+# cargo-audit gate for this branch.
+#
+# The hardened builder (build.sh) runs `cargo audit` before it compiles, and 1.55.0's
+# Cargo.lock trips it. None of these come from the two local patches on this branch - they
+# are upstream's dependency pins, and the stock ghcr.io/aaif-goose/goose:1.55.0 image this
+# branch is based on carries exactly the same ones. Recorded here so the gate keeps its
+# value for anything NEW, while these are knowingly accepted.
+[advisories]
+ignore = [
+    # rustls 0.23.45; all four are patched in 0.23.46. Exposure is real - goose is an HTTPS
+    # client for provider APIs - so this one wants a bump rather than a permanent ignore:
+    #   cargo update -p rustls
+    "RUSTSEC-2026-0346", # Debug impls for client session values expose TLS secrets
+    "RUSTSEC-2026-0347", # buffered application data sent to outer server after ECH rejection
+    "RUSTSEC-2026-0348", # brotli certificate decompression can allocate up to 1 GiB
+    "RUSTSEC-2026-0349", # unauthenticated ServerHello can downgrade later connections
+
+    # zip 8.6.0, fixed in 9.0.0 - a major bump, so not taken here. Reachable only by
+    # extracting an attacker-controlled archive (goose unpacks its own release bundles and
+    # skill/plugin zips), which is not a path this box exercises unattended.
+    "RUSTSEC-2026-0367", # SUID/SGID bits preserved during ZIP extraction
+    "RUSTSEC-2026-0368", # ZipArchive::extract symlink target escapes the destination
+    "RUSTSEC-2026-0369", # extract() applies Unix permissions through symlinks
+
+    # Unmaintained, transitive (YAML bindings pulled in by a dependency).
+    "RUSTSEC-2024-0449", # unsafe-libyaml is unmaintained
+]
