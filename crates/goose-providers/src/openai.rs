@@ -305,6 +305,7 @@ impl OpenAiProvider {
     ) -> Result<MessageStream, ProviderError> {
         let mut request_config = model_config.clone();
         request_config.supports_vision = self.vision_support(model_config);
+        request_config.reasoning = self.reasoning_support(model_config);
         if self.native_openai && request_config.reasoning.is_none() {
             let canonical = goose_provider_types::canonical::maybe_get_canonical_model(
                 "openai",
@@ -518,6 +519,21 @@ impl OpenAiProvider {
         self.declared_model(&model_config.model_name)
             .and_then(|model| model.supports_vision)
             .or(model_config.supports_vision)
+    }
+
+    /// The reasoning counterpart of `vision_support`.
+    ///
+    /// Nothing read the declared `models[].reasoning` before this, so a custom provider could say
+    /// `"reasoning": true` and goose would still fall back to the OpenAI-name heuristic and send no
+    /// `reasoning_effort` at all - the effort selector would appear to do nothing. `ModelInfo.reasoning`
+    /// is a plain `bool`, so "declared false" and "not declared" are indistinguishable; only an
+    /// explicit true overrides, and anything else keeps whatever the model config already had (which
+    /// is how the canonical registry and the name heuristics still apply).
+    fn reasoning_support(&self, model_config: &ModelConfig) -> Option<bool> {
+        self.declared_model(&model_config.model_name)
+            .map(|model| model.reasoning)
+            .filter(|declared| *declared)
+            .or(model_config.reasoning)
     }
 
     fn sanitize_request_for_compat(
