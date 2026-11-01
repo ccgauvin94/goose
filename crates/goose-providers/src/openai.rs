@@ -305,6 +305,7 @@ impl OpenAiProvider {
     ) -> Result<MessageStream, ProviderError> {
         let mut request_config = model_config.clone();
         request_config.supports_vision = self.vision_support(model_config);
+        request_config.reasoning = self.reasoning_support(model_config);
         if self.native_openai && request_config.reasoning.is_none() {
             let canonical = goose_provider_types::canonical::maybe_get_canonical_model(
                 "openai",
@@ -493,7 +494,7 @@ impl OpenAiProvider {
     /// matched by [`is_openai_responses_model`] (which only recognises
     /// OpenAI's own `o*`/`gpt-5*` model names). These need the unified
     /// [`ThinkingEffort`] mapped onto the request explicitly.
-    const PROVIDERS_NEEDING_REASONING_EFFORT_MAPPING: &[&str] = &["meta"];
+    const PROVIDERS_NEEDING_REASONING_EFFORT_MAPPING: &[&str] = &["meta", "commandcode"];
 
     /// Maps the unified thinking effort onto Meta's Muse Spark
     /// `reasoning_effort` levels: `low`, `medium`, `high`, `xhigh`.
@@ -510,6 +511,26 @@ impl OpenAiProvider {
         }
     }
 
+    /// Maps the unified thinking effort onto a provider that accepts the full
+    /// `off`/`low`/`medium`/`high`/`xhigh` ladder.
+    ///
+    /// Only the bottom rung differs between providers, and it is the one nobody sees until
+    /// something forces it: CommandCode's gateway answers
+    /// `400 Invalid option: expected one of "off"|"low"|"medium"|"high"|"xhigh"|"max"` to
+    /// `reasoning_effort: "none"` and 200 to `"off"` (measured 2026-10-31), while OpenAI and the
+    /// TensorFold engine behind gauvin-id are the exact reverse. `one_shot_model_config` forces
+    /// `ThinkingEffort::Off`, so compaction, session naming and summarization are the only
+    /// callers that ever sent the wrong word - which is why compaction was the visible breakage.
+    fn standard_reasoning_effort(effort: ThinkingEffort) -> &'static str {
+        match effort {
+            ThinkingEffort::Off => "off",
+            ThinkingEffort::Low => "low",
+            ThinkingEffort::Medium => "medium",
+            ThinkingEffort::High => "high",
+            ThinkingEffort::Max => "xhigh",
+        }
+    }
+
     fn declared_model(&self, model_name: &str) -> Option<&ModelInfo> {
         find_declared_model(self.custom_models.as_deref()?, model_name)
     }
@@ -518,6 +539,21 @@ impl OpenAiProvider {
         self.declared_model(&model_config.model_name)
             .and_then(|model| model.supports_vision)
             .or(model_config.supports_vision)
+    }
+
+    /// The reasoning counterpart of `vision_support`.
+    ///
+    /// Nothing read the declared `models[].reasoning` before this, so a custom provider could say
+    /// `"reasoning": true` and goose would still fall back to the OpenAI-name heuristic and send no
+    /// `reasoning_effort` at all - the effort selector would appear to do nothing. `ModelInfo.reasoning`
+    /// is a plain `bool`, so "declared false" and "not declared" are indistinguishable; only an
+    /// explicit true overrides, and anything else keeps whatever the model config already had (which
+    /// is how the canonical registry and the name heuristics still apply).
+    fn reasoning_support(&self, model_config: &ModelConfig) -> Option<bool> {
+        self.declared_model(&model_config.model_name)
+            .map(|model| model.reasoning)
+            .filter(|declared| *declared)
+            .or(model_config.reasoning)
     }
 
     fn sanitize_request_for_compat(
@@ -560,10 +596,12 @@ impl OpenAiProvider {
             if Self::PROVIDERS_NEEDING_REASONING_EFFORT_MAPPING.contains(&self.name.as_str()) {
                 match model_config.thinking_effort() {
                     Some(effort) => {
-                        obj.insert(
-                            "reasoning_effort".to_string(),
-                            json!(Self::meta_reasoning_effort(effort)),
-                        );
+                        let wire = if self.name == "meta" {
+                            Self::meta_reasoning_effort(effort)
+                        } else {
+                            Self::standard_reasoning_effort(effort)
+                        };
+                        obj.insert("reasoning_effort".to_string(), json!(wire));
                     }
                     None => {
                         obj.remove("reasoning_effort");

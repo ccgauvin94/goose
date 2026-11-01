@@ -264,6 +264,23 @@ pub(super) async fn build_session_setup_config(
     else {
         return Ok((mode_state, None));
     };
+    // The ladder below is built from the SESSION's model config, which is the
+    // stored one — it never goes through `ProviderRegistry::normalize_model_config`.
+    // That is the call that folds a provider's declared `models[].reasoning` into
+    // `ModelConfig.reasoning` for the REQUEST path, so without this line the effort
+    // menu fell back to the name heuristics alone: a provider could declare its
+    // model as reasoning, the wire would send `reasoning_effort` correctly, and the
+    // picker would still offer nothing but "off" (measured on
+    // `deepseek-v4.1-flash`: wire `reasoning_effort: medium`, menu `["off"]` — the
+    // UI was lying about what the model was doing). Normalising here makes the menu
+    // agree with the wire for any honestly-named model.
+    let normalized = match crate::providers::get_from_registry(provider_name).await {
+        Ok(entry) => entry
+            .normalize_model_config(model_config.clone())
+            .unwrap_or_else(|_| model_config.clone()),
+        Err(_) => model_config.clone(),
+    };
+    let model_config = &normalized;
     let model_state = build_model_state(model_config.model_name.as_str(), &inventory);
     let provider_selection = session_provider_selection(session);
     let provider_options = build_provider_options(Some(provider_name)).await;
