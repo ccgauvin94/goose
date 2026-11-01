@@ -2462,10 +2462,21 @@ impl GooseAcpAgent {
             .await
             .internal_err_ctx("Failed to get provider")?;
         let provider_name = provider.get_name().to_string();
-        let current_model_config = agent
-            .model_config_for_session(&session_id.0)
-            .await
-            .internal_err_ctx("Failed to resolve model config")?;
+        // Same reason as `build_session_setup_config`: the stored model config has
+        // not been through `ProviderRegistry::normalize_model_config`, so a
+        // provider's declared `models[].reasoning` is invisible to the effort
+        // ladder and a config CHANGE would answer with a menu that disagrees with
+        // what the wire sends. Normalise before the options are built.
+        let current_model_config = {
+            let raw = agent
+                .model_config_for_session(&session_id.0)
+                .await
+                .internal_err_ctx("Failed to resolve model config")?;
+            match crate::providers::get_from_registry(&provider_name).await {
+                Ok(entry) => entry.normalize_model_config(raw.clone()).unwrap_or(raw),
+                Err(_) => raw,
+            }
+        };
         let current_model = current_model_config.model_name.clone();
         let goose_mode = agent
             .goose_mode(&session_id.0)
