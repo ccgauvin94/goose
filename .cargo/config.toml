@@ -1,8 +1,10 @@
-[target.x86_64-pc-windows-msvc]
-rustflags = ["-C", "link-args=/FORCE:MULTIPLE /STACK:8388608"]
+[source.crates-io]
+replace-with = "vendored-sources"
 
-[target.aarch64-pc-windows-msvc]
-rustflags = ["-C", "link-args=/FORCE:MULTIPLE /STACK:8388608"]
+[source."git+https://github.com/jbg/cudaforge?rev=e7c1967340e40673db98dc9e17da0f04834a456f"]
+git = "https://github.com/jbg/cudaforge"
+rev = "e7c1967340e40673db98dc9e17da0f04834a456f"
+replace-with = "vendored-sources"
 
-[target.wasm32-unknown-unknown]
-runner = "wasm-bindgen-test-runner"
+[source.vendored-sources]
+directory = "/work/vendor"

@@ -290,6 +290,15 @@ impl ModelConfig {
     }
 
     pub fn openai_reasoning_for_model(&self, model_name: &str) -> bool {
+        // An explicit declaration wins outright. The canonical guard below exists to stop a
+        // non-OpenAI model from *inferring* OpenAI reasoning support - not to override a provider
+        // that has declared it. Checking it first made the wire gate disagree with
+        // `is_reasoning_model()` (which reads `self.reasoning` first): a model whose name resolves
+        // to a non-`openai/` canonical entry - `deepseek/deepseek-flash`, `zhipuai/glm-5.3-flash` -
+        // returned false here, so the effort selector appeared and sent nothing.
+        if let Some(reasoning) = self.reasoning {
+            return reasoning;
+        }
         let canonical = crate::canonical::maybe_get_canonical_model("openai", model_name);
         if canonical
             .as_ref()
@@ -297,8 +306,8 @@ impl ModelConfig {
         {
             return false;
         }
-        self.reasoning
-            .or_else(|| canonical.and_then(|model| model.reasoning))
+        canonical
+            .and_then(|model| model.reasoning)
             .unwrap_or_else(|| is_openai_responses_model(model_name))
     }
 

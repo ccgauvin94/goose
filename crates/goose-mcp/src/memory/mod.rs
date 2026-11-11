@@ -158,7 +158,14 @@ impl MemoryServer {
         if let Ok(global_memories) = retrieved_global_memories {
             if !global_memories.is_empty() {
                 updated_instructions.push_str("\n\nGlobal Memories:\n");
-                for (category, memories) in global_memories {
+                // Deterministic category order, for the same reason as `retrieve_all`'s flatten
+                // above: that returns a HashMap, and its `read_dir` walk is unordered, so the
+                // category order would otherwise change on every extension start and bust the
+                // prefix cache. See issue #12507.
+                let mut categories: Vec<(String, Vec<String>)> =
+                    global_memories.into_iter().collect();
+                categories.sort_by(|a, b| a.0.cmp(&b.0));
+                for (category, memories) in categories {
                     updated_instructions.push_str(&format!("\nCategory: {}\n", category));
                     for memory in memories {
                         updated_instructions.push_str(&format!("- {}\n", memory));
@@ -247,9 +254,21 @@ impl MemoryServer {
                         continue;
                     }
                     let category_memories = self.retrieve(category, is_global, working_dir)?;
+                    // Flatten in a stable order. `retrieve` returns a HashMap keyed by each
+                    // entry's tags, so `into_values()` iterates in an order that is randomised
+                    // per process; the order *within* a tag group is the memory file's own, and
+                    // we keep it. A random order here rewrites the system prompt on every
+                    // extension start, which invalidates the provider's prefix cache from this
+                    // point on (everything after the tools is re-prefilled). See issue #12507.
+                    let mut groups: Vec<(String, Vec<String>)> =
+                        category_memories.into_iter().collect();
+                    groups.sort_by(|a, b| a.0.cmp(&b.0));
                     memories.insert(
                         category.to_string(),
-                        category_memories.into_values().flatten().collect(),
+                        groups
+                            .into_iter()
+                            .flat_map(|(_, entries)| entries)
+                            .collect(),
                     );
                 }
             }
