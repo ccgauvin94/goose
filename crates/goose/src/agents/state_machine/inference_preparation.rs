@@ -1,6 +1,7 @@
 //! Goose-specific inference request preparation.
 
 use crate::agents::extension_manager::{ExtensionLease, ExtensionManager};
+use crate::agents::tool_deferral::{deferred_tool_names, ToolDeferralStrategy};
 use crate::agents::PromptManager;
 use crate::config::GooseMode;
 use crate::session::Session;
@@ -11,6 +12,7 @@ use goose_agent::inference::{InferenceRequestPreparer, PreparedInferenceRequest}
 use goose_agent::operation::{messages_since_kickoff, InferenceInput};
 use goose_providers::conversation::message::Message;
 use goose_providers::conversation::Conversation;
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex as StdMutex};
 
 pub struct GooseInferenceRequestPreparer<'a> {
@@ -18,6 +20,8 @@ pub struct GooseInferenceRequestPreparer<'a> {
     pub(crate) extension_lease: Arc<StdMutex<Option<Arc<ExtensionLease>>>>,
     pub(crate) tool_inspection_manager: &'a ToolInspectionManager,
     pub(crate) context_limit: usize,
+    pub(crate) deferral: ToolDeferralStrategy,
+    pub(crate) always_load_tools: HashSet<String>,
 }
 
 #[async_trait]
@@ -86,6 +90,25 @@ impl InferenceRequestPreparer<Session> for GooseInferenceRequestPreparer<'_> {
             system_prompt,
             tools,
             additional_messages,
+            deferred_tools: self.deferred_tools().await,
         })
+    }
+}
+
+impl GooseInferenceRequestPreparer<'_> {
+    /// The schemas the provider, rather than goose, will let the model discover.
+    /// Only a provider-native strategy defers anything: `lookup` withholds the
+    /// schemas from the request by dropping them from the tool list.
+    async fn deferred_tools(&self) -> Option<Vec<String>> {
+        if !self.deferral.is_provider_native() {
+            return None;
+        }
+        let lease = self
+            .extension_lease
+            .lock()
+            .expect("extension lease unavailable")
+            .clone()?;
+        let names = deferred_tool_names(&lease, &self.always_load_tools).await;
+        (!names.is_empty()).then_some(names)
     }
 }

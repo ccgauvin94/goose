@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
@@ -25,6 +26,7 @@ use crate::agents::state_machine::{
     UnhandledToolCallsOperation,
 };
 use crate::agents::subagent_handler::ForegroundSubagentRunner;
+use crate::agents::tool_deferral::ToolDeferralStrategy;
 use crate::agents::tool_execution::DECLINED_RESPONSE;
 use crate::config::Config;
 use crate::hooks::HookManager;
@@ -39,7 +41,7 @@ pub(crate) struct StateMachineConfig<'a> {
     pub(crate) compaction_threshold: f64,
     pub(crate) tool_call_cutoff: usize,
     pub(crate) tool_pair_summarization: bool,
-    pub(crate) defer_tools: bool,
+    pub(crate) deferral: ToolDeferralStrategy,
     pub(crate) always_load_tools: Vec<String>,
     pub(crate) session_manager: Arc<SessionManager>,
     pub(crate) extension_manager: Arc<ExtensionManager>,
@@ -104,7 +106,7 @@ pub(crate) fn build_state_machine(
         compaction_threshold,
         tool_call_cutoff,
         tool_pair_summarization,
-        defer_tools,
+        deferral,
         always_load_tools,
         session_manager,
         extension_manager,
@@ -122,6 +124,8 @@ pub(crate) fn build_state_machine(
         context_relevance,
     } = config;
     let manages_own_context = provider.manages_own_context();
+    // Deferral names the same tools in two places, so build the set once.
+    let always_load: HashSet<String> = always_load_tools.iter().cloned().collect();
 
     let mut operations: Vec<Arc<dyn Operation<Session, GooseEffect> + '_>> = vec![
         Arc::new(FinalOutputOperation::new(provider.clone())),
@@ -138,7 +142,7 @@ pub(crate) fn build_state_machine(
             Arc::clone(&extension_manager),
             hook_manager.clone(),
             Arc::clone(&extension_lease),
-            defer_tools,
+            deferral,
             always_load_tools,
         )),
         Arc::new(RemainingToolCallsOperation::new(
@@ -194,6 +198,8 @@ pub(crate) fn build_state_machine(
         extension_lease,
         tool_inspection_manager,
         context_limit,
+        deferral,
+        always_load_tools: always_load,
     };
     let inference_provider = Arc::new(GooseInferenceProvider::new(provider));
     let inference = Arc::new(

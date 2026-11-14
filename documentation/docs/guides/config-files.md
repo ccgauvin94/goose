@@ -51,7 +51,7 @@ The following settings can be configured at the root level of your config.yaml f
 | `GOOSE_CACHE_TTL` | Anthropic prompt-cache TTL; `1h` keeps the cached prefix alive across idle gaps at a higher cache-write rate. Headless runs always use `5m` | "5m", "1h" | "5m" | No |
 | `GOOSE_MODE` | [Tool execution behavior](/docs/guides/managing-tools/goose-permissions) | "auto", "approve", "chat", "smart_approve" | "auto" | No |
 | `GOOSE_MAX_TURNS` | [Maximum number of turns](/docs/guides/sessions/smart-context-management#maximum-turns) allowed without user input | Integer (e.g., 10, 50, 100) | 1000 | No |
-| `GOOSE_TOOL_DEFERRAL` | Publish MCP tool names up front; enable schemas on demand with `enable_tools` | "lookup" | Disabled when unset | No |
+| `GOOSE_TOOL_DEFERRAL` | Defer MCP tool schemas: `off` sends them all, `lookup` publishes the names and loads schemas through `enable_tools`, and `anthropic` is provider-native (Anthropic only) | `"off"`, `"lookup"`, or `"anthropic"` | `"off"` (disabled when unset or unrecognised) | No |
 | `GOOSE_TOOL_DEFERRAL_ALWAYS_LOAD` | Comma-separated exact model-visible tool names to keep eager when deferral is enabled | String (e.g., "serverA__toolA,serverB__toolC") | Empty | No |
 | `GOOSE_TOOLSHIM` | Enable tool interpretation | true/false | false | No |
 | `GOOSE_TOOLSHIM_OLLAMA_MODEL` | Model for tool interpretation | Model name (e.g., "llama3.2") | System default | No |
@@ -76,7 +76,13 @@ The following settings can be configured at the root level of your config.yaml f
 
 Additional [environment variables](/docs/guides/environment-variables) may also be supported in config.yaml.
 
-With `GOOSE_TOOL_DEFERRAL: lookup`, the model calls `enable_tools` to load MCP tool schemas on demand; platform tools remain available immediately. `GOOSE_TOOL_DEFERRAL_ALWAYS_LOAD` keeps selected tools eager using their exact model-visible names, including extension prefixes. Whitespace around comma-separated entries is ignored. This list has no effect unless deferral is enabled and does not override availability, visibility, or permissions.
+`GOOSE_TOOL_DEFERRAL` withholds MCP tool schemas from the request instead of sending them all. Platform tools are unaffected: they stay available immediately in every mode.
+
+- `off` (the default, and what an unset or unrecognised value means) sends every schema.
+- `lookup` is the portable strategy: goose lists the withheld tool names in the system prompt and the model calls `enable_tools` to load their schemas on demand.
+- `anthropic` is provider-native and only the Anthropic format implements it: goose still sends every schema, but marks the deferred ones so Anthropic's own tool search loads them instead. The model discovers tools through that search tool, so goose adds neither `enable_tools` nor the list of names to the prompt. On any other provider this value leaves the request as `off` would, because the provider never sees the deferral request parameters.
+
+`GOOSE_TOOL_DEFERRAL_ALWAYS_LOAD` keeps selected tools eager using their exact model-visible names, including extension prefixes. Whitespace around comma-separated entries is ignored. This list has no effect unless deferral is enabled and does not override availability, visibility, or permissions.
 
 ## Example Configuration
 

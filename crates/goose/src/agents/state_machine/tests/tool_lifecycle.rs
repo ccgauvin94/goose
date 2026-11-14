@@ -185,6 +185,51 @@ async fn configured_tools_remain_eager_with_deferral() -> Result<()> {
 }
 
 #[tokio::test]
+async fn anthropic_deferral_leaves_every_tool_to_the_provider() -> Result<()> {
+    let (pipeline, api) = test_pipeline().await?;
+    let pipeline = pipeline.with_anthropic_deferral().record_model_configs();
+    api.on("add one").call(ADD, value(1));
+    api.on("result: 1").reply("one");
+
+    pipeline.run(["add one"]).await?;
+
+    let calls = api.calls();
+    // the provider's search tool publishes discovery, so goose filters nothing
+    // and adds no `enable_tools`
+    assert!(calls[0].advertises_tool(ADD));
+    assert!(calls[0].advertises_tool(DIVIDE));
+    assert!(!calls[0].advertises_tool("enable_tools"));
+    // nor does it list the names in the prompt
+    assert!(!calls[0].system_contains("MCP tools available to enable"));
+    // app-only tools are still not model-visible
+    assert!(!calls[0].advertises_tool(APP_ONLY));
+
+    let params = pipeline.recorded_request_params();
+    let params = params[0]
+        .as_ref()
+        .expect("provider-native deferral must stamp the request");
+    assert_eq!(params["tool_search"], json!("tool_search_tool_regex_20251119"));
+    let deferred = params["defer_tool_schemas"]
+        .as_array()
+        .expect("deferred tool names");
+    assert!(deferred.iter().any(|name| name == ADD));
+    assert!(!deferred.iter().any(|name| name == APP_ONLY));
+    Ok(())
+}
+
+#[tokio::test]
+async fn lookup_deferral_stamps_nothing_for_the_provider() -> Result<()> {
+    let (pipeline, api) = test_pipeline().await?;
+    let pipeline = pipeline.with_deferred_tools().record_model_configs();
+    api.on("hello").reply("hi there!");
+
+    pipeline.run(["hello"]).await?;
+
+    assert!(pipeline.recorded_request_params()[0].is_none());
+    Ok(())
+}
+
+#[tokio::test]
 async fn deferred_tools_follow_the_conversation_lifecycle() -> Result<()> {
     let (pipeline, api) = test_pipeline().await?;
     let pipeline = pipeline.with_deferred_tools();

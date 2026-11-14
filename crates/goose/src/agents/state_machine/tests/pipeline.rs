@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use anyhow::Result;
@@ -15,6 +15,7 @@ use crate::agents::mcp_client::McpClientTrait;
 use crate::agents::state_machine::{
     messages_since_kickoff, Emitter, GooseEffect, Operation, RunStatus, StateMachine,
 };
+use crate::agents::tool_deferral::ToolDeferralStrategy;
 use crate::agents::{AgentEvent, StateMachineServices, StateMachineServicesConfig, TurnSettings};
 use crate::config::permission::{PermissionLevel, PermissionManager};
 use crate::config::GooseMode;
@@ -278,7 +279,13 @@ impl TestPipeline {
 
     pub(super) fn with_deferred_tools(mut self) -> Self {
         assert!(!self.services.initialized());
-        self.turn_settings.defer_tools = true;
+        self.turn_settings.deferral = ToolDeferralStrategy::Lookup;
+        self
+    }
+
+    pub(super) fn with_anthropic_deferral(mut self) -> Self {
+        assert!(!self.services.initialized());
+        self.turn_settings.deferral = ToolDeferralStrategy::Anthropic;
         self
     }
 
@@ -321,6 +328,19 @@ impl TestPipeline {
             .unwrap()
             .iter()
             .map(ModelConfig::thinking_effort)
+            .collect()
+    }
+
+    pub(super) fn recorded_request_params(
+        &self,
+    ) -> Vec<Option<HashMap<String, serde_json::Value>>> {
+        self.recorded_model_configs
+            .as_ref()
+            .expect("model config recording was not enabled")
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|config| config.request_params.clone())
             .collect()
     }
 
@@ -911,7 +931,7 @@ async fn build_test_pipeline(
             on_failure_timeout: std::time::Duration::from_secs(1),
             stop_hook_block_cap: 3,
             tool_pair_summarization: true,
-            defer_tools: false,
+            deferral: ToolDeferralStrategy::Off,
             always_load_tools: Vec::new(),
             compaction_threshold: COMPACTION_THRESHOLD,
             compaction_token_limit: usize::MAX,

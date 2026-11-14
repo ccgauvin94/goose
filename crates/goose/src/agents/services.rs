@@ -11,6 +11,7 @@ use tracing_futures::Instrument;
 
 use super::gen_ai_telemetry;
 use super::tool_confirmation_coordinator::{ActiveTurnGuard, ConfirmationAnswer};
+use super::tool_deferral::ToolDeferralStrategy;
 use crate::action_required_manager::ElicitationOutcome;
 use crate::agents::extension_manager::{ClientContext, ExtensionLease, ExtensionManager};
 use crate::agents::provider_manager::ProviderManager;
@@ -117,7 +118,7 @@ pub struct TurnSettings {
     pub on_failure_timeout: std::time::Duration,
     pub stop_hook_block_cap: u32,
     pub tool_pair_summarization: bool,
-    pub defer_tools: bool,
+    pub deferral: ToolDeferralStrategy,
     pub always_load_tools: Vec<String>,
     pub compaction_threshold: f64,
     pub compaction_token_limit: usize,
@@ -149,9 +150,12 @@ impl TurnSettings {
                 .get_param::<u32>("GOOSE_STOP_HOOK_BLOCK_CAP")
                 .unwrap_or(DEFAULT_BLOCK_CAP),
             tool_pair_summarization: crate::context_mgmt::tool_pair_summarization_enabled(),
-            defer_tools: config
-                .get_param::<String>("GOOSE_TOOL_DEFERRAL")
-                .is_ok_and(|value| value == "lookup"),
+            deferral: ToolDeferralStrategy::from_setting(
+                config
+                    .get_param::<String>("GOOSE_TOOL_DEFERRAL")
+                    .ok()
+                    .as_deref(),
+            ),
             always_load_tools: config
                 .get_param::<String>("GOOSE_TOOL_DEFERRAL_ALWAYS_LOAD")
                 .unwrap_or_default()
@@ -749,7 +753,7 @@ impl StateMachineServices {
             compaction_threshold,
             tool_call_cutoff,
             tool_pair_summarization: settings.tool_pair_summarization,
-            defer_tools: settings.defer_tools,
+            deferral: settings.deferral,
             always_load_tools: settings.always_load_tools.clone(),
             session_manager: self.session_manager.clone(),
             extension_manager: Arc::clone(&self.extension_manager),

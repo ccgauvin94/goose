@@ -16,6 +16,7 @@ use crate::agents::extension_manager::{CallRequest, ExtensionLease, ExtensionMan
 use crate::agents::reply_parts::is_tool_visible_to_model;
 use crate::agents::state_machine::ops_llm::{ADVERTISED_TOOLS_NOTE, LLM_OPERATION_NAME};
 use crate::agents::state_machine::tool_hooks::{check_pre_tool_hooks, emit_post_tool_hooks};
+use crate::agents::tool_deferral::{deferred_tool_names, ToolDeferralStrategy};
 use crate::agents::state_machine::{
     applied, messages_since_kickoff, not_applicable, yielded_with, ConversationEffect, Emitter,
     GooseEffect, Operation, OperationResult, SlashCommand,
@@ -245,7 +246,7 @@ pub struct ToolExecutionOperation {
     hook_manager: HookManager,
     lease: Arc<StdMutex<Option<Arc<ExtensionLease>>>>,
     batch: Arc<StdMutex<ToolBatch>>,
-    defer_tools: bool,
+    deferral: ToolDeferralStrategy,
     always_load_tools: HashSet<String>,
 }
 
@@ -254,7 +255,7 @@ impl ToolExecutionOperation {
         extension_manager: Arc<ExtensionManager>,
         hook_manager: HookManager,
         lease: Arc<StdMutex<Option<Arc<ExtensionLease>>>>,
-        defer_tools: bool,
+        deferral: ToolDeferralStrategy,
         always_load_tools: Vec<String>,
     ) -> Self {
         Self {
@@ -262,7 +263,7 @@ impl ToolExecutionOperation {
             hook_manager,
             lease,
             batch: Arc::default(),
-            defer_tools,
+            deferral,
             always_load_tools: always_load_tools.into_iter().collect(),
         }
     }
@@ -273,7 +274,14 @@ impl ToolExecutionOperation {
             return false;
         }
         let _ = lease;
-        self.defer_tools
+        self.deferral.defers_tools()
+    }
+
+    /// Whether goose publishes the withheld names itself, with `enable_tools`
+    /// and the prompt part that lists them. A provider-native strategy does
+    /// not: its search tool is the way back to the schemas.
+    fn publishes_deferred_names(&self, lease: &ExtensionLease) -> bool {
+        self.defers_tools(lease) && !self.deferral.is_provider_native()
     }
 
     async fn mcp_tools(&self, lease: &ExtensionLease) -> Vec<Tool> {
@@ -772,13 +780,10 @@ impl Operation<Session, GooseEffect> for ToolExecutionOperation {
     async fn inference_tools(&self, session: &Session) -> Result<Vec<Tool>> {
         let lease = self.lease(session).await?;
         let mut tools = lease.tools_excluding(crate::skills::EXTENSION_NAME).await;
-        if self.defers_tools(&lease) {
-            let deferred: HashSet<_> = self
-                .mcp_tools(&lease)
+        if self.defers_tools(&lease) && !self.deferral.is_provider_native() {
+            let deferred: HashSet<_> = deferred_tool_names(&lease, &self.always_load_tools)
                 .await
                 .into_iter()
-                .filter(|tool| !self.always_load_tools.contains(tool.name.as_ref()))
-                .map(|tool| tool.name.to_string())
                 .collect();
             let enabled = session
                 .conversation
@@ -839,14 +844,8 @@ impl Operation<Session, GooseEffect> for ToolExecutionOperation {
             &extensions,
             self.defers_tools(&lease),
         ));
-        if self.defers_tools(&lease) {
-            let mut names: Vec<_> = self
-                .mcp_tools(&lease)
-                .await
-                .into_iter()
-                .filter(|tool| !self.always_load_tools.contains(tool.name.as_ref()))
-                .map(|tool| tool.name.to_string())
-                .collect();
+        if self.publishes_deferred_names(&lease) {
+            let mut names = deferred_tool_names(&lease, &self.always_load_tools).await;
             names.sort();
             prompt_parts.push(("mcp_tools".to_string(), format!(
                 "MCP tools available to enable: {}. Call enable_tools with exact tool_names before using them. \

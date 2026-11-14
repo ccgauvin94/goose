@@ -1,6 +1,6 @@
 //! Provider inference operation for the unrolled agent loop.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::Result;
@@ -15,6 +15,7 @@ use goose_provider_types::conversation::{
 };
 use goose_provider_types::errors::ProviderError;
 use goose_provider_types::model::ModelConfig;
+use serde_json::{json, Value};
 use tracing_futures::Instrument;
 
 use crate::machine::MachineSession;
@@ -28,6 +29,31 @@ pub struct PreparedInferenceRequest {
     pub system_prompt: String,
     pub tools: Vec<rmcp::model::Tool>,
     pub additional_messages: Vec<Message>,
+    /// Tool names whose schemas the provider, not goose, should let the model
+    /// discover. `None` leaves the request exactly as configured.
+    pub deferred_tools: Option<Vec<String>>,
+}
+
+/// Anthropic's request `type` for its regex tool-search tool. Declaring it is
+/// what tells the model that the deferred schemas can be found at all.
+pub const ANTHROPIC_TOOL_SEARCH_TYPE: &str = "tool_search_tool_regex_20251119";
+
+/// A copy of `config` that asks the provider to hand the model these schemas on
+/// demand instead of up front. Anything else is returned unchanged, so a request
+/// that does not defer stays byte-identical.
+pub fn with_deferred_tool_schemas(
+    config: &ModelConfig,
+    deferred: Option<&[String]>,
+) -> ModelConfig {
+    let Some(names) = deferred.filter(|names| !names.is_empty()) else {
+        return config.clone();
+    };
+    let mut config = config.clone();
+    let params: &mut HashMap<String, Value> =
+        config.request_params.get_or_insert_with(HashMap::new);
+    params.insert("defer_tool_schemas".to_string(), json!(names));
+    params.insert("tool_search".to_string(), json!(ANTHROPIC_TOOL_SEARCH_TYPE));
+    config
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -65,6 +91,7 @@ impl<S: MaybeSync> InferenceRequestPreparer<S> for IdentityInferenceRequestPrepa
                 .join("\n\n"),
             tools: input.tools,
             additional_messages: Vec::new(),
+            deferred_tools: None,
         })
     }
 }
@@ -476,10 +503,14 @@ impl<S: MachineSession, E: InferenceEffect> Inference<S, E> for InferenceRunner<
                 system_prompt,
                 tools,
                 additional_messages,
+                deferred_tools,
             } = self
                 .request_preparer
                 .prepare(session, conversation, input)
                 .await?;
+
+            let provider_model_config =
+                with_deferred_tool_schemas(&model_config, deferred_tools.as_deref());
 
             for message in &additional_messages {
                 messages_for_provider.push(message.clone());
@@ -512,7 +543,7 @@ impl<S: MachineSession, E: InferenceEffect> Inference<S, E> for InferenceRunner<
             let stream = self
                 .provider
                 .stream(
-                    &model_config,
+                    &provider_model_config,
                     &system_prompt,
                     conversation_for_provider.messages(),
                     &tools,
@@ -671,5 +702,47 @@ mod tests {
     #[test]
     fn whitespace_only_text_is_an_empty_response() {
         assert!(is_empty_response(&Message::assistant().with_text(" \n\t ")));
+    }
+
+    fn configured_model() -> ModelConfig {
+        let mut config = ModelConfig::new("claude-sonnet-4-5");
+        config.request_params = Some(HashMap::from([("cache_ttl".to_string(), json!("1h"))]));
+        config
+    }
+
+    #[test]
+    fn a_request_that_defers_nothing_is_untouched() {
+        let config = configured_model();
+        let empty: Vec<String> = Vec::new();
+        for deferred in [None, Some(empty.as_slice())] {
+            let stamped = with_deferred_tool_schemas(&config, deferred);
+            assert_eq!(stamped.request_params, config.request_params);
+            assert_eq!(stamped.model_name, config.model_name);
+        }
+    }
+
+    #[test]
+    fn deferred_names_are_stamped_with_the_search_tool() {
+        let config = configured_model();
+        let names = vec![
+            "calculator__add".to_string(),
+            "calculator__divide".to_string(),
+        ];
+        let stamped = with_deferred_tool_schemas(&config, Some(&names));
+        let params = stamped.request_params.as_ref().expect("request params");
+        assert_eq!(
+            params["defer_tool_schemas"],
+            json!(["calculator__add", "calculator__divide"])
+        );
+        assert_eq!(params["tool_search"], json!(ANTHROPIC_TOOL_SEARCH_TYPE));
+        // configured params survive, and the shared config is left alone
+        assert_eq!(params["cache_ttl"], json!("1h"));
+        assert_eq!(stamped.model_name, config.model_name);
+        assert!(config
+            .request_params
+            .as_ref()
+            .expect("request params")
+            .get("defer_tool_schemas")
+            .is_none());
     }
 }
