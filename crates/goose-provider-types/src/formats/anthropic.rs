@@ -68,6 +68,12 @@ pub struct AnthropicFormatOptions {
     pub cache_ttl: Option<CacheTtl>,
     pub prefix_mismatch_behavior: Option<PrefixMismatchBehavior>,
     pub strip_thinking_history: bool,
+    /// Anthropic deferred loading: the tools whose definitions stay out of the prompt until a search finds them.
+    /// Empty unless the request defers; the search tool below is what discovers them.
+    pub defer_tool_schemas: Vec<String>,
+    /// The request `type` of the tool search tool to declare beside them
+    /// (`tool_search_tool_regex_20251119` or `tool_search_tool_bm25_20251119`). None: no search tool.
+    pub tool_search: Option<String>,
 }
 
 impl AnthropicFormatOptions {
@@ -120,6 +126,12 @@ impl AnthropicFormatOptions {
             cache_ttl,
             prefix_mismatch_behavior,
             strip_thinking_history: self.strip_thinking_history,
+            defer_tool_schemas: model_config
+                .request_param::<Vec<String>>("defer_tool_schemas")
+                .unwrap_or(self.defer_tool_schemas),
+            tool_search: model_config
+                .request_param::<String>("tool_search")
+                .or(self.tool_search),
         }
     }
 
@@ -236,6 +248,7 @@ const TOOL_RESULT_TYPE: &str = "tool_result";
 const THINKING_TYPE: &str = "thinking";
 const REDACTED_THINKING_TYPE: &str = "redacted_thinking";
 const CACHE_CONTROL_FIELD: &str = "cache_control";
+const DEFER_LOADING_FIELD: &str = "defer_loading";
 const ID_FIELD: &str = "id";
 const NAME_FIELD: &str = "name";
 const INPUT_FIELD: &str = "input";
@@ -560,13 +573,44 @@ pub fn format_tools(tools: &[Tool], options: &AnthropicFormatOptions) -> Vec<Val
     let mut tool_specs = Vec::new();
 
     for tool in tools {
-        if unique_tools.insert(tool.name.clone()) {
-            tool_specs.push(json!({
-                NAME_FIELD: tool.name,
+        let name = tool.name.to_string();
+        if unique_tools.insert(name.clone()) {
+            let mut spec = json!({
+                NAME_FIELD: name,
                 "description": tool.description,
                 "input_schema": anthropic_flavored_input_schema(tool.input_schema.clone())
-            }));
+            });
+            // Deferred loading: the definition still travels with every request (the API needs it to expand a
+            // search's references) and stays out of the prompt's tool block until a search returns it.
+            if options.defer_tool_schemas.iter().any(|deferred| *deferred == name) {
+                spec.as_object_mut()
+                    .expect("a tool spec is an object")
+                    .insert(DEFER_LOADING_FIELD.to_string(), json!(true));
+            }
+            tool_specs.push(spec);
         }
+    }
+
+    // A request cannot defer every tool: the search tool is the only way back to a definition, so one stays visible.
+    if tool_specs.len() > 1
+        && tool_specs
+            .iter()
+            .all(|spec| spec.get(DEFER_LOADING_FIELD).is_some())
+    {
+        tool_specs[0]
+            .as_object_mut()
+            .expect("a tool spec is an object")
+            .remove(DEFER_LOADING_FIELD);
+    }
+
+    // The search tool is declared last and never deferred; its calls run on the server, so it reaches no client.
+    if let Some(search) = options.tool_search.as_deref() {
+        let name = if search.contains("bm25") {
+            "tool_search_tool_bm25"
+        } else {
+            "tool_search_tool_regex"
+        };
+        tool_specs.push(json!({ TYPE_FIELD: search, NAME_FIELD: name }));
     }
 
     if options.prompt_cache_disabled {
@@ -1751,6 +1795,71 @@ mod tests {
         };
         let spec = format_messages_with_options(&messages, &opts);
         assert_eq!(spec[0]["content"][0]["type"], "thinking");
+    }
+
+    fn three_tools() -> Vec<Tool> {
+        ["get_weather", "send_email", "search_files"]
+            .into_iter()
+            .map(|name| Tool::new(name, name, object!({ "type": "object" })))
+            .collect()
+    }
+
+    #[test]
+    fn deferred_tools_are_marked_and_the_search_tool_is_declared_last() {
+        let options = AnthropicFormatOptions {
+            defer_tool_schemas: vec!["send_email".to_string(), "search_files".to_string()],
+            tool_search: Some("tool_search_tool_regex_20251119".to_string()),
+            ..Default::default()
+        };
+        let specs = format_tools(&three_tools(), &options);
+
+        assert_eq!(specs.len(), 4, "three definitions and the search tool");
+        assert!(specs[0].get("defer_loading").is_none());
+        assert_eq!(specs[1]["defer_loading"], json!(true));
+        assert_eq!(specs[2]["defer_loading"], json!(true));
+        // the search tool is last, names itself, and is never deferred: it is the way back to the others
+        assert_eq!(specs[3]["type"], "tool_search_tool_regex_20251119");
+        assert_eq!(specs[3]["name"], "tool_search_tool_regex");
+        assert!(specs[3].get("defer_loading").is_none());
+        // the cache breakpoint rides the last definition, which is the search tool
+        assert!(specs[3].get("cache_control").is_some());
+    }
+
+    #[test]
+    fn the_bm25_search_tool_names_itself() {
+        let options = AnthropicFormatOptions {
+            tool_search: Some("tool_search_tool_bm25_20251119".to_string()),
+            ..Default::default()
+        };
+        let specs = format_tools(&three_tools(), &options);
+        assert_eq!(specs[3]["type"], "tool_search_tool_bm25_20251119");
+        assert_eq!(specs[3]["name"], "tool_search_tool_bm25");
+    }
+
+    #[test]
+    fn a_request_cannot_defer_every_tool() {
+        let options = AnthropicFormatOptions {
+            defer_tool_schemas: vec![
+                "get_weather".to_string(),
+                "send_email".to_string(),
+                "search_files".to_string(),
+            ],
+            tool_search: Some("tool_search_tool_regex_20251119".to_string()),
+            ..Default::default()
+        };
+        let specs = format_tools(&three_tools(), &options);
+
+        // Anthropic answers 400 when everything is deferred, so one definition stays visible
+        assert!(specs[0].get("defer_loading").is_none());
+        assert_eq!(specs[1]["defer_loading"], json!(true));
+        assert_eq!(specs[2]["defer_loading"], json!(true));
+    }
+
+    #[test]
+    fn no_deferral_leaves_the_payload_unchanged() {
+        let specs = format_tools(&three_tools(), &AnthropicFormatOptions::default());
+        assert_eq!(specs.len(), 3);
+        assert!(specs.iter().all(|spec| spec.get("defer_loading").is_none()));
     }
 
     #[test]
