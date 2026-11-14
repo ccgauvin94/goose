@@ -247,6 +247,8 @@ const TOOL_USE_TYPE: &str = "tool_use";
 const TOOL_RESULT_TYPE: &str = "tool_result";
 const THINKING_TYPE: &str = "thinking";
 const REDACTED_THINKING_TYPE: &str = "redacted_thinking";
+const SERVER_TOOL_USE_TYPE: &str = "server_tool_use";
+const TOOL_SEARCH_TOOL_RESULT_TYPE: &str = "tool_search_tool_result";
 const CACHE_CONTROL_FIELD: &str = "cache_control";
 const DEFER_LOADING_FIELD: &str = "defer_loading";
 const ID_FIELD: &str = "id";
@@ -488,6 +490,12 @@ fn format_messages_with_options(
                         }));
                     }
                 }
+                // Anthropic's own tool blocks (server_tool_use / tool_search_tool_result)
+                // must go back byte-identical, in place, or the server cannot re-expand
+                // the tool definitions it discovered on the previous turn.
+                MessageContentBlock::ProviderNative(native) => {
+                    content.push(native.raw.clone());
+                }
                 MessageContentBlock::Image(image) => {
                     content.push(convert_image(image, &ImageFormat::Anthropic));
                 }
@@ -582,7 +590,7 @@ pub fn format_tools(tools: &[Tool], options: &AnthropicFormatOptions) -> Vec<Val
             });
             // Deferred loading: the definition still travels with every request (the API needs it to expand a
             // search's references) and stays out of the prompt's tool block until a search returns it.
-            if options.defer_tool_schemas.iter().any(|deferred| *deferred == name) {
+            if options.defer_tool_schemas.contains(&name) {
                 spec.as_object_mut()
                     .expect("a tool spec is an object")
                     .insert(DEFER_LOADING_FIELD.to_string(), json!(true));
@@ -644,6 +652,16 @@ pub fn format_system(system: &str, options: &AnthropicFormatOptions) -> Value {
     }])
 }
 
+/// Blocks Anthropic executes on its own side. goose has no structural model for
+/// them, but the server needs them echoed back verbatim to re-expand the tools it
+/// discovered, so they travel as raw JSON rather than being flattened or dropped.
+fn is_provider_native_block_type(block_type: &str) -> bool {
+    matches!(
+        block_type,
+        SERVER_TOOL_USE_TYPE | TOOL_SEARCH_TOOL_RESULT_TYPE
+    )
+}
+
 /// Convert Anthropic's API response to internal Message format
 pub fn response_to_message(response: &Value) -> Result<Message> {
     let content_blocks = response
@@ -696,6 +714,9 @@ pub fn response_to_message(response: &Value) -> Result<Message> {
                     .and_then(|d| d.as_str())
                     .ok_or_else(|| anyhow!("Missing redacted_thinking data"))?;
                 message = message.with_redacted_thinking(data);
+            }
+            Some(block_type) if is_provider_native_block_type(block_type) => {
+                message = message.with_provider_native(block_type, block.clone());
             }
             _ => continue,
         }
@@ -1112,8 +1133,17 @@ where
             arguments: String,
         }
 
+        /// A `server_tool_use` block: the engine's own tool call. Its input streams
+        /// as `input_json_delta`, so the block is only complete at `content_block_stop`.
+        struct StreamingServerToolUse {
+            id: String,
+            name: String,
+            input_json: String,
+        }
+
         let mut accumulated_tool_calls: std::collections::HashMap<i32, StreamingToolCall> = std::collections::HashMap::new();
         let mut held = Vec::new();
+        let mut accumulated_server_tool_uses: std::collections::HashMap<i32, StreamingServerToolUse> = std::collections::HashMap::new();
         let mut final_usage: Option<ProviderUsage> = None;
         let mut message_id: Option<String> = None;
         let mut thinking: Option<ThinkingState> = None;
@@ -1215,6 +1245,31 @@ where
                                     tracing::warn!("redacted_thinking block missing '{}' field", DATA_FIELD);
                                 }
                             }
+                            Some(SERVER_TOOL_USE_TYPE) => {
+                                if let Some(index) = block_index(&event.data) {
+                                    accumulated_server_tool_uses.insert(index, StreamingServerToolUse {
+                                        id: content_block
+                                            .get(ID_FIELD)
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or_default()
+                                            .to_string(),
+                                        name: content_block
+                                            .get(NAME_FIELD)
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or_default()
+                                            .to_string(),
+                                        input_json: String::new(),
+                                    });
+                                }
+                            }
+                            Some(TOOL_SEARCH_TOOL_RESULT_TYPE) => {
+                                // Arrives whole in the start event: no deltas, so the raw
+                                // block is complete as soon as it is announced.
+                                let mut message = Message::assistant()
+                                    .with_provider_native(TOOL_SEARCH_TOOL_RESULT_TYPE, content_block.clone());
+                                message.id = message_id.clone();
+                                yield (Some(message), None);
+                            }
                             _ => {}
                         }
                     }
@@ -1229,10 +1284,14 @@ where
                                 if held.is_empty() { yield (Some(message), None); } else { held.push(message); }
                             }
                             Ok(ContentBlockDelta::InputJsonDelta { partial_json }) => {
-                                if let Some(call) = block_index(&event.data)
-                                    .and_then(|index| accumulated_tool_calls.get_mut(&index))
-                                {
-                                    call.arguments.push_str(&partial_json);
+                                if let Some(index) = block_index(&event.data) {
+                                    if let Some(call) = accumulated_tool_calls.get_mut(&index) {
+                                        call.arguments.push_str(&partial_json);
+                                    } else if let Some(server_tool) =
+                                        accumulated_server_tool_uses.get_mut(&index)
+                                    {
+                                        server_tool.input_json.push_str(&partial_json);
+                                    }
                                 }
                             }
                             Ok(ContentBlockDelta::ThinkingDelta { thinking: t }) => {
@@ -1263,6 +1322,27 @@ where
                         }
                     }
                     if let Some(index) = block_index(&event.data) {
+                        if let Some(server_tool) = accumulated_server_tool_uses.remove(&index) {
+                            // Rebuild the block in Anthropic's own shape so it can be
+                            // echoed back verbatim on the next request.
+                            let input = if server_tool.input_json.trim().is_empty() {
+                                json!({})
+                            } else {
+                                crate::json::parse_tool_arguments(&server_tool.input_json)
+                                    .unwrap_or_else(|| json!({}))
+                            };
+                            let raw = json!({
+                                TYPE_FIELD: SERVER_TOOL_USE_TYPE,
+                                ID_FIELD: server_tool.id,
+                                NAME_FIELD: server_tool.name,
+                                INPUT_FIELD: input,
+                            });
+                            let mut message = Message::assistant()
+                                .with_provider_native(SERVER_TOOL_USE_TYPE, raw);
+                            message.id = message_id.clone();
+                            yield (Some(message), None);
+                        }
+
                         if let Some(call) = accumulated_tool_calls.remove(&index) {
                             let StreamingToolCall { id, name, arguments } = call;
                             let parsed_args = if arguments.is_empty() {
@@ -3605,5 +3685,135 @@ mod tests {
             let request_messages = req["messages"].as_array().unwrap();
             assert_eq!(breakpoints(request_messages), vec![(0, 1)]);
         }
+    }
+
+    /// Anthropic's deferred-tool flow returns blocks goose has no structural model
+    /// for. They must come back on the next request or the server cannot re-expand
+    /// the tool definitions it discovered, so they are carried as raw JSON.
+    #[test]
+    fn server_tool_blocks_survive_a_round_trip() -> Result<()> {
+        let response = json!({
+            "id": "msg_deferred",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "Looking that up."},
+                {
+                    "type": "server_tool_use",
+                    "id": "srvtoolu_1",
+                    "name": "tool_search_tool_regex",
+                    "input": {"query": "calendar"}
+                },
+                {
+                    "type": "tool_search_tool_result",
+                    "tool_use_id": "srvtoolu_1",
+                    "content": {
+                        "type": "tool_search_tool_search_result",
+                        "tool_references": [
+                            {"type": "tool_reference", "tool_name": "calendar__get_events"}
+                        ]
+                    }
+                },
+                {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "calendar__get_events",
+                    "input": {"days": 7}
+                }
+            ],
+            "model": "claude-sonnet-4-6",
+            "stop_reason": "tool_use"
+        });
+
+        let message = response_to_message(&response)?;
+
+        assert_eq!(
+            message.content.len(),
+            4,
+            "every block must survive parsing, in order: {:?}",
+            message.content
+        );
+        let native: Vec<_> = message
+            .content
+            .iter()
+            .filter_map(|c| c.as_provider_native())
+            .collect();
+        assert_eq!(native.len(), 2);
+        assert_eq!(native[0].block_type, SERVER_TOOL_USE_TYPE);
+        assert_eq!(native[0].raw, response["content"][1]);
+        assert_eq!(native[1].block_type, TOOL_SEARCH_TOOL_RESULT_TYPE);
+        assert_eq!(native[1].raw, response["content"][2]);
+
+        let spec = format_messages(&[message]);
+        let blocks = spec[0]["content"].as_array().expect("content array");
+        assert_eq!(blocks.len(), 4);
+        assert_eq!(blocks[0]["type"], TEXT_TYPE);
+        assert_eq!(
+            blocks[1], response["content"][1],
+            "server_tool_use must be replayed byte-identical"
+        );
+        assert_eq!(
+            blocks[2], response["content"][2],
+            "tool_search_tool_result must be replayed byte-identical"
+        );
+        assert_eq!(blocks[3]["type"], TOOL_USE_TYPE);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_streaming_server_tool_blocks() {
+        let events = concat!(
+            r#"data: {"type":"message_start","message":{"id":"msg_srv","role":"assistant","content":[],"model":"claude-sonnet-4-6","usage":{"input_tokens":10,"output_tokens":0}}}"#,
+            "\n",
+            r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srvtoolu_1","name":"tool_search_tool_regex","input":{}}}"#,
+            "\n",
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"calen"}}"#,
+            "\n",
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"dar\"}"}}"#,
+            "\n",
+            r#"data: {"type":"content_block_stop","index":0}"#,
+            "\n",
+            r#"data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_search_tool_result","tool_use_id":"srvtoolu_1","content":{"type":"tool_search_tool_search_result","tool_references":[{"type":"tool_reference","tool_name":"calendar__get_events"}]}}}"#,
+            "\n",
+            r#"data: {"type":"content_block_stop","index":1}"#,
+            "\n",
+            r#"data: {"type":"content_block_start","index":2,"content_block":{"type":"text","text":""}}"#,
+            "\n",
+            r#"data: {"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"Done."}}"#,
+            "\n",
+            r#"data: {"type":"content_block_stop","index":2}"#,
+            "\n",
+            r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":12}}"#,
+            "\n",
+            r#"data: {"type":"message_stop"}"#,
+        );
+
+        let mut native = Vec::new();
+        let mut text = Vec::new();
+        for result in collect_stream_results(events).await {
+            let Ok((Some(msg), _usage)) = result else {
+                continue;
+            };
+            for content in &msg.content {
+                if let Some(block) = content.as_provider_native() {
+                    native.push(block.clone());
+                } else if let Some(t) = content.as_text() {
+                    text.push(t.to_string());
+                }
+            }
+        }
+
+        assert_eq!(native.len(), 2);
+        assert_eq!(native[0].block_type, SERVER_TOOL_USE_TYPE);
+        assert_eq!(native[0].raw["id"], "srvtoolu_1");
+        assert_eq!(native[0].raw["name"], "tool_search_tool_regex");
+        assert_eq!(native[0].raw["input"], json!({"query": "calendar"}));
+        assert_eq!(native[1].block_type, TOOL_SEARCH_TOOL_RESULT_TYPE);
+        assert_eq!(
+            native[1].raw["content"]["tool_references"][0]["tool_name"],
+            "calendar__get_events"
+        );
+        assert_eq!(text, vec!["Done."]);
     }
 }

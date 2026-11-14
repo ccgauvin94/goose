@@ -239,6 +239,33 @@ pub struct RedactedThinkingContentBlock {
     pub data: String,
 }
 
+/// A provider-native content block carried through goose without interpretation.
+///
+/// Some providers return blocks in an assistant turn that goose has no structural
+/// model for, but that must be echoed back verbatim on the next request. The
+/// clearest case is Anthropic's deferred-tool flow: a `server_tool_use` block (the
+/// engine's own tool call) and a `tool_search_tool_result` block (the discovered
+/// `tool_reference`s). The server can only re-expand the tool definitions it
+/// discovered if the same blocks come back, so they are kept as raw JSON rather
+/// than flattened into text or dropped.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderNativeContentBlock {
+    /// The provider's own discriminator for the block, e.g. `server_tool_use`.
+    pub block_type: String,
+    /// The complete block exactly as the provider sent it, `type` included.
+    pub raw: serde_json::Value,
+}
+
+impl ProviderNativeContentBlock {
+    pub fn new<S: Into<String>>(block_type: S, raw: serde_json::Value) -> Self {
+        Self {
+            block_type: block_type.into(),
+            raw,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SystemNotificationType {
@@ -326,6 +353,7 @@ pub enum MessageContentBlock {
     ActionRequired(ActionRequired),
     Thinking(ThinkingContentBlock),
     RedactedThinking(RedactedThinkingContentBlock),
+    ProviderNative(ProviderNativeContentBlock),
     SystemNotification(SystemNotificationContent),
     Error(ErrorContent),
 }
@@ -369,6 +397,9 @@ impl fmt::Display for MessageContentBlock {
             },
             MessageContentBlock::Thinking(t) => write!(f, "[Thinking: {}]", t.thinking),
             MessageContentBlock::RedactedThinking(_r) => write!(f, "[RedactedThinking]"),
+            MessageContentBlock::ProviderNative(b) => {
+                write!(f, "[ProviderNative: {}]", b.block_type)
+            }
             MessageContentBlock::SystemNotification(r) => {
                 write!(f, "[SystemNotification: {}]", r.msg)
             }
@@ -611,6 +642,11 @@ impl MessageContentBlock {
         MessageContentBlock::RedactedThinking(RedactedThinkingContentBlock { data: data.into() })
     }
 
+    /// Carry a provider-native block (e.g. Anthropic's `server_tool_use`) verbatim.
+    pub fn provider_native<S: Into<String>>(block_type: S, raw: serde_json::Value) -> Self {
+        MessageContentBlock::ProviderNative(ProviderNativeContentBlock::new(block_type, raw))
+    }
+
     pub fn system_notification<S: Into<String>>(
         notification_type: SystemNotificationType,
         msg: S,
@@ -717,6 +753,14 @@ impl MessageContentBlock {
     pub fn as_redacted_thinking(&self) -> Option<&RedactedThinkingContentBlock> {
         match self {
             MessageContentBlock::RedactedThinking(redacted) => Some(redacted),
+            _ => None,
+        }
+    }
+
+    /// Get the provider-native block if this is a ProviderNative variant
+    pub fn as_provider_native(&self) -> Option<&ProviderNativeContentBlock> {
+        match self {
+            MessageContentBlock::ProviderNative(native) => Some(native),
             _ => None,
         }
     }
@@ -1177,6 +1221,15 @@ impl Message {
     /// Add redacted thinking content to the message
     pub fn with_redacted_thinking<S: Into<String>>(self, data: S) -> Self {
         self.with_content(MessageContentBlock::redacted_thinking(data))
+    }
+
+    /// Attach a provider-native block verbatim (e.g. Anthropic's `server_tool_use`).
+    pub fn with_provider_native<S: Into<String>>(
+        self,
+        block_type: S,
+        raw: serde_json::Value,
+    ) -> Self {
+        self.with_content(MessageContentBlock::provider_native(block_type, raw))
     }
 
     /// Get the concatenated text content of the message, separated by newlines

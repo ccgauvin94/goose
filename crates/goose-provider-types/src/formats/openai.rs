@@ -327,7 +327,9 @@ pub fn format_messages_with_options(
                 MessageContentBlock::RedactedThinking(_) => {
                     continue;
                 }
-                MessageContentBlock::SystemNotification(_) | MessageContentBlock::Error(_) => {
+                MessageContentBlock::SystemNotification(_)
+                | MessageContentBlock::Error(_)
+                | MessageContentBlock::ProviderNative(_) => {
                     continue;
                 }
                 MessageContentBlock::ToolRequest(request) => match &request.tool_call {

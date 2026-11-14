@@ -282,7 +282,8 @@ fn format_messages(
                 MessageContentBlock::SystemNotification(_)
                 | MessageContentBlock::Error(_)
                 | MessageContentBlock::ToolConfirmationRequest(_)
-                | MessageContentBlock::ActionRequired(_) => {}
+                | MessageContentBlock::ActionRequired(_)
+                | MessageContentBlock::ProviderNative(_) => {}
             }
         }
 

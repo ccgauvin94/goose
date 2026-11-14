@@ -229,6 +229,11 @@ fn message_part_json(content: &MessageContent) -> Value {
         MessageContent::RedactedThinking(_) => json!({
             "type": "redacted_reasoning",
         }),
+        // a provider's own server-tool bookkeeping is wire state, not a telemetry part
+        MessageContent::ProviderNative(block) => json!({
+            "type": "provider_native",
+            "block_type": block.block_type,
+        }),
         MessageContent::ToolConfirmationRequest(request) => json!({
             "type": "tool_confirmation",
             "id": request.id,

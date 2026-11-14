@@ -74,6 +74,9 @@ pub fn format_messages(messages: &[Message]) -> Vec<Value> {
                 MessageContentBlock::RedactedThinking(_redacted) => {
                     // Skip redacted thinking for now
                 }
+                MessageContentBlock::ProviderNative(_native) => {
+                    // Skip provider-native blocks we have no voice for
+                }
                 MessageContentBlock::Image(_) => continue, // Snowflake doesn't support image content yet
                 MessageContentBlock::Document(document) => {
                     if !text_content.is_empty() {

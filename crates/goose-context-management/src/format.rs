@@ -63,6 +63,8 @@ pub fn format_message_for_compacting(msg: &Message) -> String {
             },
             MessageContent::Thinking(_) => None,
             MessageContent::RedactedThinking(_) => None,
+            // a provider's own server-tool bookkeeping says nothing a compaction summary needs
+            MessageContent::ProviderNative(_) => None,
             MessageContent::SystemNotification(notification) => {
                 Some(format!("system_notification: {}", notification.msg))
             }
