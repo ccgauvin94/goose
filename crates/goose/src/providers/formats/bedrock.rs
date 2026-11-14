@@ -244,6 +244,9 @@ pub fn to_bedrock_message_content(
                 Err(_) => bedrock::ContentBlock::Text("".to_string()),
             }
         }
+        // a provider's own server-tool block has no Bedrock equivalent; an empty text part keeps the
+        // turn's shape without inventing content
+        MessageContent::ProviderNative(_) => bedrock::ContentBlock::Text(String::new()),
         MessageContent::SystemNotification(_) => {
             bail!("SystemNotification should not get passed to the provider")
         }
