@@ -86,6 +86,16 @@ impl ProviderEntry {
         {
             model.supports_vision = Some(supports_vision);
         }
+        // `ModelInfo.reasoning` is a plain bool, so a declaration can only turn
+        // the thinking controls ON — `false` is indistinguishable from absent,
+        // and canonical detection still decides the rest. Without this a
+        // declared reasoning model never gets a thinking budget on the wire,
+        // because every format gates thinking on `ModelConfig.reasoning`.
+        if find_declared_model(&self.metadata.known_models, &model.model_name)
+            .is_some_and(|m| m.reasoning)
+        {
+            model.reasoning = Some(true);
+        }
         if let Some(catalog_provider_id) = &self.catalog_provider_id {
             model = model.with_canonical_vision_support(catalog_provider_id);
         }

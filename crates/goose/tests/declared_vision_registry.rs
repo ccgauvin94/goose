@@ -164,3 +164,49 @@ async fn catalog_provider_id_resolves_vision_for_renamed_provider() {
         );
     }
 }
+
+/// A declarative provider's `models[].reasoning` has to reach `ModelConfig`,
+/// because every format gates its thinking controls on that flag: the anthropic
+/// one emits `thinking: {type: enabled, budget_tokens: N}` only when it is set,
+/// so without this hop a declared reasoning model runs with no budget at all and
+/// the session's effort level silently does nothing.
+#[tokio::test]
+async fn persisted_reasoning_declarations_reach_the_model_config() {
+    let root = tempfile::tempdir().unwrap();
+    let root_path = root.path().to_str().unwrap();
+    let _guard = env_lock::lock_env([("GOOSE_PATH_ROOT", Some(root_path))]);
+
+    for declared in [true, false] {
+        let mut info = ModelInfo::new("declared-reasoner");
+        info.reasoning = declared;
+        let saved = create_custom_provider(CreateCustomProviderParams {
+            engine: "anthropic".to_string(),
+            display_name: "Declared Reasoning Self Test".to_string(),
+            api_url: "http://localhost:1".to_string(),
+            api_key: None,
+            models: vec![info],
+            supports_streaming: Some(false),
+            headers: None,
+            requires_auth: false,
+            catalog_provider_id: None,
+            base_path: None,
+            toolshim: false,
+            preserves_thinking: None,
+            auth: None,
+        })
+        .unwrap();
+        refresh_custom_providers().await.unwrap();
+        let entry = get_from_registry(&saved.name).await.unwrap();
+
+        let model = entry
+            .normalize_model_config(ModelConfig::new("declared-reasoner"))
+            .unwrap();
+
+        assert_eq!(
+            model.reasoning,
+            declared.then_some(true),
+            "declared={declared}: a declaration turns the controls on, and its \
+             absence leaves canonical detection to decide"
+        );
+    }
+}
