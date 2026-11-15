@@ -1,7 +1,9 @@
 //! Goose-specific inference request preparation.
 
 use crate::agents::extension_manager::{ExtensionLease, ExtensionManager};
-use crate::agents::tool_deferral::{deferred_tool_names, ToolDeferralStrategy};
+use crate::agents::tool_deferral::{
+    called_without_discovery, deferred_tool_names, ToolDeferralStrategy,
+};
 use crate::agents::PromptManager;
 use crate::config::GooseMode;
 use crate::session::Session;
@@ -90,7 +92,7 @@ impl InferenceRequestPreparer<Session> for GooseInferenceRequestPreparer<'_> {
             system_prompt,
             tools,
             additional_messages,
-            deferred_tools: self.deferred_tools().await,
+            deferred_tools: self.deferred_tools(conversation).await,
         })
     }
 }
@@ -99,7 +101,7 @@ impl GooseInferenceRequestPreparer<'_> {
     /// The schemas the provider, rather than goose, will let the model discover.
     /// Only a provider-native strategy defers anything: `lookup` withholds the
     /// schemas from the request by dropping them from the tool list.
-    async fn deferred_tools(&self) -> Option<Vec<String>> {
+    async fn deferred_tools(&self, conversation: &Conversation) -> Option<Vec<String>> {
         if !self.deferral.is_provider_native() {
             return None;
         }
@@ -108,7 +110,8 @@ impl GooseInferenceRequestPreparer<'_> {
             .lock()
             .expect("extension lease unavailable")
             .clone()?;
-        let names = deferred_tool_names(&lease, &self.always_load_tools).await;
+        let keep_loaded = called_without_discovery(Some(conversation));
+        let names = deferred_tool_names(&lease, &self.always_load_tools, &keep_loaded).await;
         (!names.is_empty()).then_some(names)
     }
 }

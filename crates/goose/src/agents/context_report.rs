@@ -11,7 +11,7 @@ pub use goose_sdk_types::custom_requests::{
 
 use crate::agents::extension_manager::get_tool_owner;
 use crate::agents::state_machine::enrich_unclaimed_tool_errors;
-use crate::agents::tool_deferral::deferred_tool_names;
+use crate::agents::tool_deferral::{called_without_discovery, deferred_tool_names};
 use crate::agents::{PromptManager, SessionConfig, StateMachineServices};
 use crate::conversation::message::{Message, MessageContent};
 use crate::conversation::{
@@ -172,7 +172,8 @@ impl StateMachineServices {
                 if settings.deferral.is_provider_native() && !code_execution_active {
                     let always_load: HashSet<String> =
                         settings.always_load_tools.iter().cloned().collect();
-                    deferred_tool_names(&lease, &always_load)
+                    let keep_loaded = called_without_discovery(session.conversation.as_ref());
+                    deferred_tool_names(&lease, &always_load, &keep_loaded)
                         .await
                         .into_iter()
                         .collect()
