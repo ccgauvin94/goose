@@ -16,11 +16,11 @@ use crate::agents::extension_manager::{CallRequest, ExtensionLease, ExtensionMan
 use crate::agents::reply_parts::is_tool_visible_to_model;
 use crate::agents::state_machine::ops_llm::{ADVERTISED_TOOLS_NOTE, LLM_OPERATION_NAME};
 use crate::agents::state_machine::tool_hooks::{check_pre_tool_hooks, emit_post_tool_hooks};
-use crate::agents::tool_deferral::{deferred_tool_names, ToolDeferralStrategy};
 use crate::agents::state_machine::{
     applied, messages_since_kickoff, not_applicable, yielded_with, ConversationEffect, Emitter,
     GooseEffect, Operation, OperationResult, SlashCommand,
 };
+use crate::agents::tool_deferral::{deferred_tool_names, ToolDeferralStrategy};
 use crate::agents::tool_execution::{
     tool_stream, ToolCallResult, ToolStreamItem, CHAT_MODE_TOOL_SKIPPED_RESPONSE,
 };
@@ -850,6 +850,18 @@ impl Operation<Session, GooseEffect> for ToolExecutionOperation {
             prompt_parts.push(("mcp_tools".to_string(), format!(
                 "MCP tools available to enable: {}. Call enable_tools with exact tool_names before using them. \
                  Their schemas become available on your next response. Enabling does not execute a tool.",
+                names.join(", ")
+            )));
+        } else if self.defers_tools(&lease) {
+            // The provider publishes only the search tool, so the model would be guessing at what exists. goose
+            // decided what to withhold, so goose is the only party that can say it — and on a provider whose
+            // search tool description it cannot edit (Anthropic's own), the only party that can say it at all.
+            let mut names = deferred_tool_names(&lease, &self.always_load_tools).await;
+            names.sort();
+            prompt_parts.push(("tool_search".to_string(), format!(
+                "Tools whose definitions are not loaded: {}. They exist and are callable: find one with the tool \
+                 search tool before using it (its pattern is a case-insensitive regular expression matched against \
+                 tool names, descriptions and arguments).",
                 names.join(", ")
             )));
         }

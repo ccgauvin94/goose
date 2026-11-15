@@ -199,8 +199,11 @@ async fn anthropic_deferral_leaves_every_tool_to_the_provider() -> Result<()> {
     assert!(calls[0].advertises_tool(ADD));
     assert!(calls[0].advertises_tool(DIVIDE));
     assert!(!calls[0].advertises_tool("enable_tools"));
-    // nor does it list the names in the prompt
+    // nor does it use the lookup wording
     assert!(!calls[0].system_contains("MCP tools available to enable"));
+    // but goose does name what it withheld: the provider's search tool cannot, and only goose knows the list
+    assert!(calls[0].system_contains("Tools whose definitions are not loaded"));
+    assert!(calls[0].system_contains(ADD));
     // app-only tools are still not model-visible
     assert!(!calls[0].advertises_tool(APP_ONLY));
 
@@ -208,7 +211,10 @@ async fn anthropic_deferral_leaves_every_tool_to_the_provider() -> Result<()> {
     let params = params[0]
         .as_ref()
         .expect("provider-native deferral must stamp the request");
-    assert_eq!(params["tool_search"], json!("tool_search_tool_regex_20251119"));
+    assert_eq!(
+        params["tool_search"],
+        json!("tool_search_tool_regex_20251119")
+    );
     let deferred = params["defer_tool_schemas"]
         .as_array()
         .expect("deferred tool names");
