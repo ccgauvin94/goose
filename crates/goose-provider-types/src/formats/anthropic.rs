@@ -1,5 +1,6 @@
 use crate::canonical::maybe_get_canonical_model;
 use crate::canonical::ThinkingMode;
+use crate::conversation::message::ProviderNativeContentBlock;
 use crate::conversation::message::{Message, MessageContentBlock};
 use crate::conversation::token_usage::{CostSource, ProviderUsage, Usage};
 use crate::documents::{
@@ -74,6 +75,12 @@ pub struct AnthropicFormatOptions {
     /// The request `type` of the tool search tool to declare beside them
     /// (`tool_search_tool_regex_20251119` or `tool_search_tool_bm25_20251119`). None: no search tool.
     pub tool_search: Option<String>,
+    /// The tools this request actually declares. A replayed search result that references
+    /// anything else is dropped: the tool is gone from the session (an extension that left the
+    /// lease, a session that never had it), and the API rejects the whole request over one
+    /// stale reference — which would brick a chat whose history outlives a tool.
+    /// Empty means "do not prune", which is what every non-deferring caller wants.
+    pub known_tools: Vec<String>,
 }
 
 impl AnthropicFormatOptions {
@@ -132,6 +139,7 @@ impl AnthropicFormatOptions {
             tool_search: model_config
                 .request_param::<String>("tool_search")
                 .or(self.tool_search),
+            known_tools: self.known_tools,
         }
     }
 
@@ -276,6 +284,44 @@ const EVENT_CONTENT_BLOCK_DELTA: &str = "content_block_delta";
 const EVENT_CONTENT_BLOCK_STOP: &str = "content_block_stop";
 const STOP_REASON_REFUSAL: &str = "refusal";
 const REFUSAL_FALLBACK_DETAILS: &str = "No additional details were provided.";
+
+/// A replayed `tool_search_tool_result`, with any reference to a tool this request does not
+/// declare removed. `None` means the block says nothing true any more and must not be sent.
+///
+/// The API rejects a request whose result references a tool that is not available, so one stale
+/// reference takes the whole conversation down — and history outlives tools: an extension leaves
+/// the lease, a session never had it, a tool is renamed. What the model loses is a definition it
+/// could not have used anyway.
+fn prune_tool_references(
+    native: &ProviderNativeContentBlock,
+    known_tools: &[String],
+) -> Option<serde_json::Value> {
+    if known_tools.is_empty() || native.block_type != TOOL_SEARCH_TOOL_RESULT_TYPE {
+        return Some(native.raw.clone());
+    }
+    let references = native
+        .raw
+        .pointer("/content/tool_references")
+        .and_then(|value| value.as_array())?;
+    let kept: Vec<serde_json::Value> = references
+        .iter()
+        .filter(|reference| {
+            reference
+                .get("tool_name")
+                .and_then(|name| name.as_str())
+                .is_some_and(|name| known_tools.iter().any(|known| known == name))
+        })
+        .cloned()
+        .collect();
+    if kept.len() == references.len() {
+        return Some(native.raw.clone());
+    }
+    let mut pruned = native.raw.clone();
+    pruned
+        .pointer_mut("/content/tool_references")
+        .map(|slot| *slot = serde_json::Value::Array(kept))?;
+    Some(pruned)
+}
 
 /// Coerce a tool call's optional arguments into the JSON value Anthropic
 /// expects for the `input` field of a `tool_use` content block.
@@ -494,7 +540,10 @@ fn format_messages_with_options(
                 // must go back byte-identical, in place, or the server cannot re-expand
                 // the tool definitions it discovered on the previous turn.
                 MessageContentBlock::ProviderNative(native) => {
-                    content.push(native.raw.clone());
+                    match prune_tool_references(native, &options.known_tools) {
+                        Some(block) => content.push(block),
+                        None => {}
+                    }
                 }
                 MessageContentBlock::Image(image) => {
                     content.push(convert_image(image, &ImageFormat::Anthropic));
@@ -1035,7 +1084,10 @@ pub fn create_request_for_model(
     tools: &[Tool],
     options: AnthropicFormatOptions,
 ) -> Result<Value> {
-    let options = options.for_model(provider_name, model_config);
+    let mut options = options.for_model(provider_name, model_config);
+    // The request knows which tools it declares, so a replayed search result that names any
+    // other one is dropped instead of sent (see `prune_tool_references`).
+    options.known_tools = tools.iter().map(|tool| tool.name.to_string()).collect();
     let anthropic_messages = format_messages_with_options(messages, &options);
     let tool_specs = format_tools(tools, &options);
     let system_spec = format_system(system, &options);
@@ -2869,6 +2921,40 @@ mod tests {
         assert_eq!(
             parts.output_token_limit_message_ids,
             vec![Some("msg_limit".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_search_result_loses_references_to_tools_the_request_does_not_declare() {
+        let reference = |name: &str| json!({"type": "tool_reference", "tool_name": name});
+        let message = Message::assistant().with_provider_native(
+            TOOL_SEARCH_TOOL_RESULT_TYPE,
+            json!({
+                "type": TOOL_SEARCH_TOOL_RESULT_TYPE,
+                "tool_use_id": "srvtoolu_1",
+                "content": {
+                    "type": "tool_search_tool_search_result",
+                    "tool_references": [reference("still_here"), reference("gone_with_the_extension")],
+                }
+            }),
+        );
+
+        // the request declares one of the two: only that reference survives
+        let mut options = AnthropicFormatOptions::default();
+        options.known_tools = vec!["still_here".to_string()];
+        let formatted = format_messages_with_options(&[message.clone()], &options);
+        let kept = &formatted[0]["content"][0]["content"]["tool_references"];
+        assert_eq!(kept.as_array().map(|a| a.len()), Some(1), "{formatted:?}");
+        assert_eq!(kept[0]["tool_name"], "still_here");
+
+        // no declared list means no pruning at all
+        let untouched =
+            format_messages_with_options(&[message], &AnthropicFormatOptions::default());
+        assert_eq!(
+            untouched[0]["content"][0]["content"]["tool_references"]
+                .as_array()
+                .map(|a| a.len()),
+            Some(2)
         );
     }
 
