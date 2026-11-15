@@ -258,6 +258,15 @@ pub(super) async fn build_session_setup_config(
     ) else {
         return Ok((mode_state, None));
     };
+    // The menu has to agree with the request, and the request path normalizes
+    // declared model metadata (a provider's `models[].reasoning` is what turns
+    // the thinking ladder on) — so a session whose stored config predates that
+    // normalization would otherwise offer "off" while sending a budget.
+    let model_config = crate::providers::get_from_registry(provider_name)
+        .await
+        .ok()
+        .and_then(|entry| entry.normalize_model_config(model_config.clone()).ok())
+        .unwrap_or_else(|| model_config.clone());
     let Some(inventory) = provider_inventory
         .find_entry_for_provider(provider_name)
         .await
@@ -270,7 +279,7 @@ pub(super) async fn build_session_setup_config(
     let config_options = build_config_options(
         &mode_state,
         &model_state,
-        model_config,
+        &model_config,
         provider_selection,
         provider_options,
         effort_support,

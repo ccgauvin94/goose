@@ -2443,7 +2443,7 @@ impl AcpConnection {
         let provider_name = provider.get_name().to_string();
         let current_model_config = self
             .services
-            .model_config_for_session(&session_id.0)
+            .effective_model_config_for_session(&session_id.0)
             .await
             .internal_err_ctx("Failed to resolve model config")?;
         let current_model = current_model_config.model_name.clone();

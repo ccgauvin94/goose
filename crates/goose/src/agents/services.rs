@@ -580,7 +580,7 @@ impl StateMachineServices {
         crate::agents::provider_manager::model_config_for(&session)
     }
 
-    pub(super) async fn effective_model_config_for_session(
+    pub(crate) async fn effective_model_config_for_session(
         &self,
         session_id: &str,
     ) -> Result<goose_providers::model::ModelConfig> {
