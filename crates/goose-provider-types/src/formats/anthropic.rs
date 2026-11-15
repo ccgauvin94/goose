@@ -1222,18 +1222,27 @@ where
                                 }
                             }
                             Some(THINKING_TYPE) => {
+                                let initial = content_block
+                                    .get(THINKING_TYPE)
+                                    .and_then(|t| t.as_str())
+                                    .unwrap_or_default()
+                                    .to_string();
                                 thinking = Some(ThinkingState {
-                                    text: content_block
-                                        .get(THINKING_TYPE)
-                                        .and_then(|t| t.as_str())
-                                        .unwrap_or_default()
-                                        .to_string(),
+                                    text: initial.clone(),
                                     signature: content_block
                                         .get(SIGNATURE_FIELD)
                                         .and_then(|s| s.as_str())
                                         .unwrap_or_default()
                                         .to_string(),
                                 });
+                                // a block can open with text already in it; forward that too, so
+                                // what the client renders is the whole thought and not just its tail
+                                if !initial.is_empty() {
+                                    let mut message = Message::assistant()
+                                        .with_thinking(initial, "");
+                                    message.id = message_id.clone();
+                                    if held.is_empty() { yield (Some(message), None); } else { held.push(message); }
+                                }
                             }
                             Some(REDACTED_THINKING_TYPE) => {
                                 if let Some(data) = content_block.get(DATA_FIELD).and_then(|d| d.as_str()) {
@@ -1297,6 +1306,16 @@ where
                             Ok(ContentBlockDelta::ThinkingDelta { thinking: t }) => {
                                 if let Some(ref mut state) = thinking {
                                     state.text.push_str(&t);
+                                    // Forward each delta: holding the whole block until it closes
+                                    // is what made an anthropic-wire reply look like it was doing
+                                    // nothing. The signature only arrives at the end, so the
+                                    // closing block carries that and the conversation coalesces.
+                                    if !t.is_empty() {
+                                        let mut message = Message::assistant()
+                                            .with_thinking(t, "");
+                                        message.id = message_id.clone();
+                                        if held.is_empty() { yield (Some(message), None); } else { held.push(message); }
+                                    }
                                 }
                             }
                             Ok(ContentBlockDelta::SignatureDelta { signature: s }) => {
@@ -1313,10 +1332,12 @@ where
                 }
                 EVENT_CONTENT_BLOCK_STOP => {
                     if let Some(state) = thinking.take() {
-                        // Omitted thinking arrives as an empty string with a signature and must still be replayed.
-                        if !state.text.is_empty() || !state.signature.is_empty() {
+                        // The text went out delta by delta; what is only known here is the
+                        // signature. An empty body with a signature is also how an OMITTED
+                        // thought arrives, and it must still be replayed.
+                        if !state.signature.is_empty() {
                             let mut message = Message::assistant()
-                                .with_thinking(state.text, state.signature);
+                                .with_thinking("", state.signature);
                             message.id = message_id.clone();
                             if held.is_empty() { yield (Some(message), None); } else { held.push(message); }
                         }
@@ -2796,9 +2817,18 @@ mod tests {
                 for c in &msg.content {
                     match c {
                         MessageContentBlock::Thinking(t) => {
-                            parts
-                                .thinking
-                                .push((t.thinking.clone(), t.signature.clone()));
+                            // The stream carries thinking as DELTAS so a client can render them
+                            // live; a signed block is closed, and the conversation is what
+                            // coalesces the run — mirror that here instead of counting blocks.
+                            match parts.thinking.last_mut() {
+                                Some(last) if last.1.is_empty() => {
+                                    last.0.push_str(&t.thinking);
+                                    last.1.push_str(&t.signature);
+                                }
+                                _ => parts
+                                    .thinking
+                                    .push((t.thinking.clone(), t.signature.clone())),
+                            }
                         }
                         MessageContentBlock::RedactedThinking(r) => {
                             parts.redacted_thinking.push(r.data.clone());
@@ -2875,6 +2905,42 @@ mod tests {
         assert_eq!(parts.thinking[0].0, "Let me analyze this problem.");
         assert_eq!(parts.thinking[0].1, "sig_abc123");
         assert_eq!(parts.text, vec!["Here is the answer."]);
+    }
+
+    #[tokio::test]
+    async fn test_streaming_forwards_thinking_deltas_as_they_arrive() {
+        let events = concat!(
+            r#"data: {"type":"message_start","message":{"id":"msg_1","role":"assistant","content":[],"model":"claude-opus-4-6","usage":{"input_tokens":10,"output_tokens":0}}}"#,
+            "\n",
+            r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+            "\n",
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Let me analyze"}}"#,
+            "\n",
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" this problem."}}"#,
+            "\n",
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig_abc"}}"#,
+            "\n",
+            r#"data: {"type":"content_block_stop","index":0}"#,
+            "\n",
+            r#"data: {"type":"message_stop"}"#,
+        );
+
+        let mut seen: Vec<(String, String)> = Vec::new();
+        for result in collect_stream_results(events).await {
+            if let Ok((Some(msg), _)) = result {
+                for c in &msg.content {
+                    if let MessageContentBlock::Thinking(t) = c {
+                        seen.push((t.thinking.clone(), t.signature.clone()));
+                    }
+                }
+            }
+        }
+
+        // one message per delta, then the signature on its own — not the whole block at the end
+        assert_eq!(seen.len(), 3, "each delta must reach the client: {seen:?}");
+        assert_eq!(seen[0], ("Let me analyze".to_string(), String::new()));
+        assert_eq!(seen[1], (" this problem.".to_string(), String::new()));
+        assert_eq!(seen[2], (String::new(), "sig_abc".to_string()));
     }
 
     #[tokio::test]
