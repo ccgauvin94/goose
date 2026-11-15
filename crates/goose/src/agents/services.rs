@@ -721,6 +721,20 @@ impl StateMachineServices {
         .await
     }
 
+    /// The knobs a turn runs with: the ones pinned on this process, or the
+    /// config as it stands now. Anything that has to predict a turn — the
+    /// context report, for one — resolves them here so it cannot disagree.
+    pub(crate) fn turn_settings(
+        &self,
+        provider: &dyn Provider,
+        model_config: &goose_providers::model::ModelConfig,
+    ) -> TurnSettings {
+        match &self.turn_settings {
+            Some(settings) => settings.clone(),
+            None => TurnSettings::from_config(provider, model_config),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn create_state_machine_with_lease(
         self: &Arc<Self>,
@@ -732,10 +746,7 @@ impl StateMachineServices {
         steer_queue: SteerQueue,
         extension_lease: Arc<StdMutex<Option<Arc<ExtensionLease>>>>,
     ) -> StateMachine<'_, Session, GooseEffect> {
-        let settings = match &self.turn_settings {
-            Some(settings) => settings.clone(),
-            None => TurnSettings::from_config(provider.as_ref(), &model_config),
-        };
+        let settings = self.turn_settings(provider.as_ref(), &model_config);
         let max_turns = session_config.max_turns.unwrap_or(settings.max_turns);
         let compaction_threshold = crate::context_mgmt::capped_compaction_threshold(
             settings.compaction_threshold,

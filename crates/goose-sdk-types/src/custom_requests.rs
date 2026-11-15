@@ -408,6 +408,11 @@ pub enum ContextCategory {
     AdditionalInstructions,
     TurnContext,
     ToolDefinitions,
+    /// Schemas the request carries but the provider does not put in the
+    /// context: a provider-native deferral strategy sends them so its search
+    /// tool can find them, and they cost nothing until one is discovered. Not
+    /// part of `totalTokens` — that is the point of counting them separately.
+    DeferredTools,
     CompactionSummary,
     Messages,
 }

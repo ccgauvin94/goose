@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -11,6 +11,7 @@ pub use goose_sdk_types::custom_requests::{
 
 use crate::agents::extension_manager::get_tool_owner;
 use crate::agents::state_machine::enrich_unclaimed_tool_errors;
+use crate::agents::tool_deferral::deferred_tool_names;
 use crate::agents::{PromptManager, SessionConfig, StateMachineServices};
 use crate::conversation::message::{Message, MessageContent};
 use crate::conversation::{
@@ -124,7 +125,8 @@ impl StateMachineServices {
                 false
             }
         };
-        let extension_lease = Arc::new(std::sync::Mutex::new(Some(Arc::new(lease))));
+        let lease = Arc::new(lease);
+        let extension_lease = Arc::new(std::sync::Mutex::new(Some(Arc::clone(&lease))));
 
         let mut next_messages = session
             .conversation
@@ -158,6 +160,27 @@ impl StateMachineServices {
         }
         let tools =
             crate::agents::reply_parts::prepare_inference_tools(input.tools, code_execution_active);
+        // A provider-native deferral strategy keeps every schema in the request
+        // so the provider's search tool can reach it — but the provider does
+        // not put the deferred ones in the context, so counting them here
+        // would overstate the request by exactly what deferral saves.
+        let (tools, withheld) = if model_config.toolshim {
+            (tools, Vec::new())
+        } else {
+            let settings = self.turn_settings(provider.as_ref(), &model_config);
+            let names: HashSet<String> =
+                if settings.deferral.is_provider_native() && !code_execution_active {
+                    let always_load: HashSet<String> =
+                        settings.always_load_tools.iter().cloned().collect();
+                    deferred_tool_names(&lease, &always_load)
+                        .await
+                        .into_iter()
+                        .collect()
+                } else {
+                    HashSet::new()
+                };
+            split_withheld(tools, &names)
+        };
         let prompt = PromptManager::new().build_system_prompt_parts(
             &session,
             input.prompt_parts,
@@ -222,6 +245,15 @@ impl StateMachineServices {
             segments.push(toolshim_tool_segment(&tools, token_counter));
         } else {
             segments.extend(tool_segments(&tools, token_counter));
+            segments.extend(
+                tool_segments(&withheld, token_counter)
+                    .into_iter()
+                    .map(|mut s| {
+                        s.category = ContextCategory::DeferredTools;
+                        s.source = Some(format!("{} tools, not loaded", s.parts.len()));
+                        s
+                    }),
+            );
         }
         segments.extend(message_segments(
             messages.messages(),
@@ -232,7 +264,9 @@ impl StateMachineServices {
         // Tokenizing the rows one by one is not additive with tokenizing the
         // joined request: a positive residual is the overhead row, a negative
         // one comes off the prompt rows, so the rows always sum to the request.
-        let attributed: u64 = segments.iter().map(|segment| segment.token_count).sum();
+        // Withheld schemas are excluded on both sides — they are not in the
+        // request's context, so they can neither explain nor absorb a residual.
+        let attributed = attributed_tokens(&segments);
         if request_tokens > attributed {
             segments.push(ContextSegment {
                 category: ContextCategory::SystemPrompt,
@@ -244,7 +278,10 @@ impl StateMachineServices {
             });
         } else {
             let mut excess = attributed - request_tokens;
-            for segment in &mut segments {
+            for segment in segments
+                .iter_mut()
+                .filter(|segment| segment.category != ContextCategory::DeferredTools)
+            {
                 if excess == 0 {
                     break;
                 }
@@ -262,6 +299,28 @@ impl StateMachineServices {
             auto_compaction_pending,
         })
     }
+}
+
+/// The schemas a request carries but the provider does not put in the context,
+/// split from the ones it does. `withheld` is empty for every strategy that
+/// sends nothing extra, so the eager list is the whole list.
+fn split_withheld(tools: Vec<Tool>, withheld: &HashSet<String>) -> (Vec<Tool>, Vec<Tool>) {
+    if withheld.is_empty() {
+        return (tools, Vec::new());
+    }
+    tools
+        .into_iter()
+        .partition(|tool| !withheld.contains(tool.name.as_ref()))
+}
+
+/// The rows that sum to the request. Withheld schemas are not in the context,
+/// so they are not part of the total.
+fn attributed_tokens(segments: &[ContextSegment]) -> u64 {
+    segments
+        .iter()
+        .filter(|segment| segment.category != ContextCategory::DeferredTools)
+        .map(|segment| segment.token_count)
+        .sum()
 }
 
 fn extra_descriptor(key: &str) -> (ContextCategory, String, Option<String>) {
@@ -825,5 +884,66 @@ Finish the regression test
             messages[2].content.as_slice(),
             [MessageContent::Text(text)] if text.text == "interrupted before a reply"
         ));
+    }
+
+    #[tokio::test]
+    async fn withheld_schemas_are_split_from_the_eager_ones() {
+        let token_counter = TokenCounter::new().await.unwrap();
+        let tools = vec![
+            test_tool("analyze", None),
+            test_tool("nextcloud__nc_share", Some("nextcloud")),
+            test_tool("github__get_commit", Some("github")),
+        ];
+        let withheld: HashSet<String> = ["nextcloud__nc_share", "github__get_commit"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let whole = token_counter.count_tokens_for_tools(&tools) as u64;
+
+        let (eager, deferred) = split_withheld(tools, &withheld);
+
+        let names =
+            |tools: &[Tool]| -> Vec<String> { tools.iter().map(|t| t.name.to_string()).collect() };
+        assert_eq!(names(&eager), ["analyze"]);
+        assert_eq!(
+            names(&deferred),
+            ["nextcloud__nc_share", "github__get_commit"],
+            "request order is preserved on both sides"
+        );
+        let eager_tokens = token_counter.count_tokens_for_tools(&eager) as u64;
+        assert!(
+            eager_tokens * 2 < whole,
+            "the eager half must be far cheaper than the full set: {eager_tokens} of {whole}"
+        );
+        assert!(
+            split_withheld(eager.clone(), &HashSet::new()).1.is_empty(),
+            "no withheld names means nothing is withheld"
+        );
+    }
+
+    #[test]
+    fn a_withheld_schema_is_not_part_of_the_request_total() {
+        fn segment(category: ContextCategory, label: &str, tokens: u64) -> ContextSegment {
+            ContextSegment {
+                category,
+                label: label.to_string(),
+                source: None,
+                token_count: tokens,
+                content_preview: None,
+                parts: Vec::new(),
+            }
+        }
+        let segments = vec![
+            segment(ContextCategory::SystemPrompt, "Base system prompt", 800),
+            segment(ContextCategory::ToolDefinitions, "platform", 1_700),
+            segment(ContextCategory::DeferredTools, "nextcloud", 19_000),
+            segment(ContextCategory::Messages, "Conversation", 16),
+        ];
+
+        assert_eq!(
+            attributed_tokens(&segments),
+            2_516,
+            "the withheld row must not be counted against the request"
+        );
     }
 }
